@@ -271,46 +271,56 @@ def build_interpretation(light, confidence, leverage_regime, chips, why):
 
 
 # ---------------------------
-# Core: compute_stoplight
+# Core: compute_stoplight (DROP-IN REPLACEMENT)
 # ---------------------------
 
 def compute_stoplight():
     # Pull data
     spx_s = get_fred_series_window("SP500", n=650)
     ndx_s = get_fred_series_window("NASDAQCOM", n=650)
-    vix_s = get_fred_series_window("VIXCLS", n=120)
-    y10_s = get_fred_series_window("DGS10", n=120)
-    hy_s  = get_fred_series_window("BAMLH0A0HYM2", n=120)
+    dji_s = get_fred_series_window("DJIA", n=650)
+
+    vix_s = get_fred_series_window("VIXCLS", n=160)       # more room for percentile window
+    y10_s = get_fred_series_window("DGS10", n=160)
+    hy_s  = get_fred_series_window("BAMLH0A0HYM2", n=160)
 
     vix = series_stats(vix_s)
     y10 = series_stats(y10_s)
     hy  = series_stats(hy_s)
 
-    # Index metrics
+    # Index last values
     spx_last = float(spx_s.iloc[-1]) if len(spx_s) else np.nan
     ndx_last = float(ndx_s.iloc[-1]) if len(ndx_s) else np.nan
+    dji_last = float(dji_s.iloc[-1]) if len(dji_s) else np.nan
 
+    # Index momentum
     spx_5d  = pct_change_series(spx_s, 5)
     spx_21d = pct_change_series(spx_s, 21)
     ndx_5d  = pct_change_series(ndx_s, 5)
     ndx_21d = pct_change_series(ndx_s, 21)
+    dji_5d  = pct_change_series(dji_s, 5)
+    dji_21d = pct_change_series(dji_s, 21)
 
+    # MAs
     spx_50  = sma_series(spx_s, 50)
     spx_200 = sma_series(spx_s, 200)
     ndx_50  = sma_series(ndx_s, 50)
     ndx_200 = sma_series(ndx_s, 200)
+    dji_50  = sma_series(dji_s, 50)
+    dji_200 = sma_series(dji_s, 200)
 
-    # Trend score
+    # Trend score (now includes Dow)
     trend_score = 0
-    spx_above_50 = (not np.isnan(spx_last) and not np.isnan(spx_50) and spx_last > spx_50)
-    spx_above_200 = (not np.isnan(spx_last) and not np.isnan(spx_200) and spx_last > spx_200)
-    ndx_above_50 = (not np.isnan(ndx_last) and not np.isnan(ndx_50) and ndx_last > ndx_50)
-    ndx_above_200 = (not np.isnan(ndx_last) and not np.isnan(ndx_200) and ndx_last > ndx_200)
 
-    trend_score += 1 if spx_above_50 else -1
-    trend_score += 1 if spx_above_200 else -1
-    trend_score += 1 if ndx_above_50 else -1
-    trend_score += 1 if ndx_above_200 else -1
+    spx_above_50  = (not np.isnan(spx_last) and not np.isnan(spx_50) and spx_last > spx_50)
+    spx_above_200 = (not np.isnan(spx_last) and not np.isnan(spx_200) and spx_last > spx_200)
+    ndx_above_50  = (not np.isnan(ndx_last) and not np.isnan(ndx_50) and ndx_last > ndx_50)
+    ndx_above_200 = (not np.isnan(ndx_last) and not np.isnan(ndx_200) and ndx_last > ndx_200)
+    dji_above_50  = (not np.isnan(dji_last) and not np.isnan(dji_50) and dji_last > dji_50)
+    dji_above_200 = (not np.isnan(dji_last) and not np.isnan(dji_200) and dji_last > dji_200)
+
+    for flag in [spx_above_50, spx_above_200, ndx_above_50, ndx_above_200, dji_above_50, dji_above_200]:
+        trend_score += 1 if flag else -1
 
     # New additions
     vix_90 = get_fred_series_window("VIXCLS", n=90)
@@ -324,67 +334,88 @@ def compute_stoplight():
 
     momentum_accel = (not np.isnan(ndx_5d) and not np.isnan(ndx_21d) and ndx_5d > ndx_21d)
 
-    # Crypto
+    # Crypto (CONTEXT ONLY — NOT USED IN SCORING)
     btc_24 = crypto_return("BTC-USD", 24)
     eth_24 = crypto_return("ETH-USD", 24)
     btc_7d = crypto_return("BTC-USD", 24 * 7)
     eth_7d = crypto_return("ETH-USD", 24 * 7)
-    agree = (not np.isnan(btc_24) and not np.isnan(eth_24) and (btc_24 * eth_24) > 0)
+    crypto_agree = (not np.isnan(btc_24) and not np.isnan(eth_24) and (btc_24 * eth_24) > 0)
 
-    # Risk scoring
+    # Risk scoring (NO CRYPTO)
     risk = 0
     macro_flags = 0
+    why_points = []  # short “scoring reasons” + human learning
 
+    # VIX
     if not np.isnan(vix["last"]):
         if vix["last"] >= 30:
             risk += 3; macro_flags += 1
+            why_points.append(f"VIX very high ({fmt_num(vix['last'],2)}) → markets pricing fear; leverage gets punished.")
         elif vix["last"] >= 25:
             risk += 2; macro_flags += 1
+            why_points.append(f"VIX elevated ({fmt_num(vix['last'],2)}) → more chop/whipsaw risk.")
         elif vix["last"] >= 20:
             risk += 1; macro_flags += 1
+            why_points.append(f"VIX above ‘calm’ ({fmt_num(vix['last'],2)}) → leverage less forgiving.")
 
     if not np.isnan(vix["d5"]) and vix["d5"] >= 3.0:
         risk += 1
+        why_points.append(f"VIX rising ~5D ({fmt_delta(vix['d5'],2)}) → stress increasing.")
         macro_flags = max(macro_flags, 1)
 
+    # HY Spreads
     if not np.isnan(hy["last"]):
         if hy["last"] >= 6.0:
             risk += 3; macro_flags += 1
+            why_points.append(f"HY spreads very wide ({fmt_num(hy['last'],2)}) → credit stress; equities can follow down.")
         elif hy["last"] >= 5.0:
             risk += 2; macro_flags += 1
+            why_points.append(f"HY spreads wide ({fmt_num(hy['last'],2)}) → risk-off from credit.")
         elif hy["last"] >= 4.0:
             risk += 1; macro_flags += 1
+            why_points.append(f"HY spreads creeping up ({fmt_num(hy['last'],2)}) → mild credit caution.")
 
     if not np.isnan(hy["d5"]) and hy["d5"] >= 0.25:
         risk += 1
+        why_points.append(f"HY widening ~5D ({fmt_delta(hy['d5'],2)}) → funding stress rising.")
         macro_flags = max(macro_flags, 1)
 
+    # 10Y
     if not np.isnan(y10["last"]):
         if y10["last"] >= 4.75:
             risk += 2; macro_flags += 1
+            why_points.append(f"10Y high ({fmt_num(y10['last'],2)}) → tight conditions; tech/growth headwind.")
         elif y10["last"] >= 4.50:
             risk += 1; macro_flags += 1
+            why_points.append(f"10Y elevated ({fmt_num(y10['last'],2)}) → watch for further tightening.")
 
     if not np.isnan(y10["d5"]) and y10["d5"] >= 0.25:
         risk += 1
+        why_points.append(f"10Y rising fast ~5D ({fmt_delta(y10['d5'],2)}) → tightening impulse.")
         macro_flags = max(macro_flags, 1)
 
+    # Volatility expansion (proxy)
     if atr_expansion:
         risk += 1
+        why_points.append("SPX vol expanding (ATR proxy up) → whipsaw/decay risk higher for leverage.")
 
-    if not np.isnan(btc_24):
-        if btc_24 <= -6.0:
-            risk += 2
-        elif btc_24 <= -3.0:
-            risk += 1
-        elif btc_24 >= 4.0:
-            risk -= 1
-
-    if (not np.isnan(btc_24) and not np.isnan(eth_24)) and (not agree):
-        risk += 1
-
+    # Net score
     net = trend_score - risk
 
+    # 5-tier regime (headline)
+    # (These bands are intentionally wide enough to avoid flip-flopping every refresh.)
+    if net <= -5:
+        regime = "HIGH RISK"
+    elif net <= -2:
+        regime = "ELEVATED RISK"
+    elif net <= 1:
+        regime = "NEUTRAL"
+    elif net <= 4:
+        regime = "LOW RISK"
+    else:
+        regime = "NIRVANA"
+
+    # Stoplight color (subtitle)
     if net >= 2:
         light = "GREEN"
     elif net <= -2:
@@ -392,6 +423,7 @@ def compute_stoplight():
     else:
         light = "YELLOW"
 
+    # Confidence (macro agreement)
     if macro_flags >= 3:
         confidence = "HIGH"
     elif macro_flags == 2:
@@ -399,39 +431,70 @@ def compute_stoplight():
     else:
         confidence = "LOW"
 
+    # Leverage regime (useful overlay)
     leverage_regime = "NEUTRAL"
     if (not np.isnan(vix_pct) and vix_pct <= 50) and (not atr_expansion) and momentum_accel and trend_score >= 2 and macro_flags == 0:
         leverage_regime = "FAVORABLE"
     if (not np.isnan(vix_pct) and vix_pct >= 75) or atr_expansion or macro_flags >= 2 or trend_score <= -2:
         leverage_regime = "UNFAVORABLE"
 
-    if light == "GREEN":
-        chips = ["TQQQ", "NVDL", "AMDL", "CONL", "BITX", "AGQ/JNUG (if metals also risk-on)"]
-    elif light == "YELLOW":
-        chips = ["Smaller size", "Shorter holds", "Prefer single-name leverage vs broad", "Partial hedge: PSQ/SQQQ", "Wait for confirmation"]
+    # Lever menu (still “menu, not advice”)
+    if regime in ["NIRVANA", "LOW RISK"]:
+        chips = ["TQQQ", "NVDL", "AMDL", "CONL", "Single-name > broad if you’ll be offline"]
+    elif regime == "NEUTRAL":
+        chips = ["Smaller size", "Shorter holds", "Prefer single-name leverage", "Wait for confirmation"]
     else:
-        chips = ["PSQ / SQQQ", "HIBS (aggressive hedge)", "Reduce/avoid leverage", "Cash is a position"]
+        chips = ["PSQ / SQQQ", "HIBS (aggressive)", "Reduce/avoid leverage", "Cash is a position"]
 
-    why = explain_indicator_blocks(vix, hy, y10, vix_pct, atr_expansion, momentum_accel, agree)
-    interpretation = build_interpretation(light, confidence, leverage_regime, chips, why)
+    # Interpretation (“learn along the way”)
+    # Keep it short + stable. Add trend + stress summary + crypto as context.
+    why = []
 
+    # Trend summary
+    why.append(
+        f"Trend score {trend_score}: "
+        f"SPX>50/200 {spx_above_50}/{spx_above_200}, "
+        f"NDX>50/200 {ndx_above_50}/{ndx_above_200}, "
+        f"DJIA>50/200 {dji_above_50}/{dji_above_200}."
+    )
+
+    # Stress summary
+    if len(why_points) == 0:
+        why.append("Stress gauges not flashing (VIX/credit/rates/vol expansion are contained).")
+    else:
+        why.extend(why_points[:4])  # don’t spam
+
+    # Vol / momentum overlay
+    if not np.isnan(vix_pct):
+        why.append(f"VIX percentile ~90D: {fmt_num(vix_pct,0)} → percentile explains “relative fear” vs recent history.")
+    why.append("NDX momentum accel (5D > 21D)." if momentum_accel else "NDX momentum not accelerating (more chop risk).")
+
+    # Crypto context (explicitly not scored)
+    if not np.isnan(btc_24) and not np.isnan(eth_24):
+        why.append(
+            f"Crypto context (not scored): BTC {fmt_num(btc_24,2)}%/24h ({fmt_num(btc_7d,2)}%/7d), "
+            f"ETH {fmt_num(eth_24,2)}%/24h ({fmt_num(eth_7d,2)}%/7d), "
+            f"{'aligned' if crypto_agree else 'mixed'}."
+        )
+
+    # Metrics (dashboard)
     metrics = [
-        {"name": "BTC", "value": f"{fmt_num(btc_24, 2)}% (24h)", "delta": f"{fmt_num(btc_7d, 2)}% (7d)"},
-        {"name": "ETH", "value": f"{fmt_num(eth_24, 2)}% (24h)", "delta": f"{fmt_num(eth_7d, 2)}% (7d)"},
+        {"name": "Regime", "value": regime, "delta": f"Stoplight: {light} | Leverage: {leverage_regime}"},
+        {"name": "Net", "value": str(int(net)), "delta": f"Trend: {trend_score} | Risk: {risk} | Macro flags: {macro_flags}"},
         {"name": "VIX", "value": fmt_num(vix["last"], 2), "delta": f"5D {fmt_delta(vix['d5'], 2)} | Pctl90D {fmt_num(vix_pct, 0)}"},
-        {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"5D {fmt_delta(y10['d5'], 2)}"},
         {"name": "HY Spread", "value": fmt_num(hy["last"], 2), "delta": f"5D {fmt_delta(hy['d5'], 2)}"},
+        {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"5D {fmt_delta(y10['d5'], 2)}"},
         {"name": "SPX", "value": fmt_num(spx_last, 2), "delta": f"5D {fmt_num(spx_5d, 2)}% | 21D {fmt_num(spx_21d, 2)}%"},
         {"name": "NDX", "value": fmt_num(ndx_last, 2), "delta": f"5D {fmt_num(ndx_5d, 2)}% | 21D {fmt_num(ndx_21d, 2)}%"},
-        {"name": "Trend score", "value": str(trend_score), "delta": f"SPX>50/200: {spx_above_50}/{spx_above_200} | NDX>50/200: {ndx_above_50}/{ndx_above_200}"},
-        {"name": "Leverage regime", "value": leverage_regime, "delta": f"ATR exp: {atr_expansion} | Mom accel: {momentum_accel}"},
-        {"name": "Net", "value": str(net), "delta": f"Risk: {risk} | Macro flags: {macro_flags} | Crypto agree: {agree}"},
+        {"name": "DJIA", "value": fmt_num(dji_last, 2), "delta": f"5D {fmt_num(dji_5d, 2)}% | 21D {fmt_num(dji_21d, 2)}%"},
+        {"name": "Vol regime", "value": "ATR expanding" if atr_expansion else "ATR stable", "delta": f"NDX accel: {momentum_accel}"},
+        {"name": "Crypto (context)", "value": f"BTC {fmt_num(btc_24,2)}% / ETH {fmt_num(eth_24,2)}% (24h)", "delta": "Not in scoring"},
     ]
 
-    # IMPORTANT: add top-level 'why' and 'chips' so the UI can’t KeyError.
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "light": light,
+        "regime": regime,
         "confidence": confidence,
         "net": int(net),
         "risk_points": int(risk),
@@ -439,11 +502,9 @@ def compute_stoplight():
         "macro_flags": int(macro_flags),
         "leverage_regime": leverage_regime,
         "metrics": metrics,
-        "interpretation": interpretation,
-        "why": interpretation.get("why", []),
-        "chips": interpretation.get("lever_menu", []),
+        "why": why[:10],
+        "chips": chips,
     }
-
 
 # ---------------------------
 # Routes
