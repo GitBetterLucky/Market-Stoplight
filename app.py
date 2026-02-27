@@ -269,6 +269,63 @@ def build_interpretation(light, confidence, leverage_regime, chips, why):
         "disclaimer": "Educational only; not investment advice. Leveraged/inverse ETFs can lose rapidly, especially in volatile regimes."
     }
 
+# ---------------------------
+# Real-time quote helper (Yahoo, no key)
+# ---------------------------
+
+def get_yahoo_quotes(symbols):
+    """
+    Returns dict: symbol -> quote dict
+    Uses Yahoo's public quote endpoint (best-effort; may rate limit).
+    """
+    if isinstance(symbols, str):
+        symbols = [symbols]
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    try:
+        j = _safe_get_json(url, params={"symbols": ",".join(symbols)}, timeout=8)
+        results = j.get("quoteResponse", {}).get("result", [])
+        return {r.get("symbol"): r for r in results if r.get("symbol")}
+    except Exception:
+        return {}
+
+def pick_pct(q):
+    """
+    Prefer premarket % if present, else regular market %.
+    Returns float or NaN.
+    """
+    if not q:
+        return np.nan
+    # Yahoo fields (may be missing depending on time)
+    pm = q.get("preMarketChangePercent", None)
+    rm = q.get("regularMarketChangePercent", None)
+    if pm is not None:
+        return float(pm)
+    if rm is not None:
+        return float(rm)
+    return np.nan
+
+def tape_signal():
+    """
+    Simple 'tape' score based on SPY/QQQ/DIA percent change.
+    Returns dict with avg move and bias label.
+    """
+    quotes = get_yahoo_quotes(["SPY", "QQQ", "DIA"])
+    spy = pick_pct(quotes.get("SPY"))
+    qqq = pick_pct(quotes.get("QQQ"))
+    dia = pick_pct(quotes.get("DIA"))
+
+    vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
+    avg = float(np.mean(vals)) if vals else np.nan
+
+    # bias bands (tune later)
+    if not np.isnan(avg) and avg <= -0.80:
+        bias = "BEAR"
+    elif not np.isnan(avg) and avg >= 0.80:
+        bias = "BULL"
+    else:
+        bias = "NEUTRAL"
+
+    return {"spy": spy, "qqq": qqq, "dia": dia, "avg": avg, "bias": bias}
 
 # ---------------------------
 # Core: compute_stoplight (DROP-IN REPLACEMENT)
