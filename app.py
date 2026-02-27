@@ -521,4 +521,53 @@ def homepage():
   <div class="wrap">
     <div class="top">
       <div class="title">Market Stoplight</div>
-      <div class="
+      <div class="stamp">Updated: {data["timestamp"]}</div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="light"></div>
+        <div class="label">{data["light"]}</div>
+        <div class="sub">Confidence: {data["confidence"]} · Risk points: {data["risk_points"]}</div>
+
+        <div class="note">
+          <div class="k">Interpretation</div>
+          <ul>
+            {''.join([f"<li>{w}</li>" for w in data["why"]])}
+          </ul>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="headline">Dashboard</div>
+        <div class="cards">
+          {''.join([f'''
+          <div class="card">
+            <div class="k">{m["name"]}</div>
+            <div class="row">
+              <div class="val">{m["value"]}</div>
+              <div class="delta">{m["delta"]}</div>
+            </div>
+          </div>
+          ''' for m in data["metrics"]])}
+        </div>
+
+        <div style="margin-top:14px;">
+          <div class="k">Levers (menu, not advice)</div>
+          {''.join([f'<span class="chip">{c}</span>' for c in data["chips"]])}
+        </div>
+
+        <div class="note">
+          <div class="k">How to use it</div>
+          <ul>
+            <li><b>GREEN</b>: leverage allowed; prefer “leaders” (NVDL/AMDL) over broad beta if you’ll be offline.</li>
+            <li><b>YELLOW</b>: smaller size, tighter holds; wait for confirmation.</li>
+            <li><b>RED</b>: hedge/defend (PSQ/SQQQ/HIBS), reduce leverage.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
