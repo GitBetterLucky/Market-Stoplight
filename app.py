@@ -459,20 +459,52 @@ def compute_stoplight():
     # Net score
     net = trend_score - risk
 
-    # 5-tier regime (headline)
-    # (These bands are intentionally wide enough to avoid flip-flopping every refresh.)
-    if net <= -5:
-        regime = "HIGH RISK"
-    elif net <= -2:
-        regime = "ELEVATED RISK"
-    elif net <= 1:
-        regime = "NEUTRAL"
-    elif net <= 4:
-        regime = "LOW RISK"
-    else:
-        regime = "NIRVANA"
+        # ---------------------------
+    # LIVE TAPE CHECK (Yahoo) — overlay only
+    # Prevents "LOW RISK" headline on a day where index tape is clearly risk-off.
+    # ---------------------------
+    tape = tape_signal()
+    tape_avg = tape.get("avg", np.nan)
+    tape_bias = tape.get("bias", "NEUTRAL")
 
+    # If tape is bearish enough, downgrade regime by 1 tier (overlay only)
+    tape_downgrade = 0
+    if not np.isnan(tape_avg) and tape_avg <= -0.80:
+        tape_downgrade = 1
+        why_points.insert(
+            0,
+            f"Tape risk-off (SPY/QQQ/DIA avg {fmt_num(tape_avg,2)}%) → avoid long leverage today."
+        )
+        
+
+    # ---------------------------
+        # 5-tier regime (headline)
+    tiers = ["HIGH RISK", "ELEVATED RISK", "NEUTRAL", "LOW RISK", "NIRVANA"]
+
+    if net <= -5:
+        base_idx = 0
+    elif net <= -2:
+        base_idx = 1
+    elif net <= 1:
+        base_idx = 2
+    elif net <= 4:
+        base_idx = 3
+    else:
+        base_idx = 4
+
+    regime_idx = max(0, base_idx - tape_downgrade)
+    regime = tiers[regime_idx]
+    
+    # Apply tape downgrade (one tier toward risk)
+    tiers = ["HIGH RISK", "ELEVATED RISK", "NEUTRAL", "LOW RISK", "NIRVANA"]
+    idx = tiers.index(regime)
+    idx = max(0, idx - tape_downgrade)
+    regime = tiers[idx]
+
+    # ---------------------------
     # Stoplight color (subtitle)
+    # ---------------------------
+
     if net >= 2:
         light = "GREEN"
     elif net <= -2:
@@ -536,8 +568,10 @@ def compute_stoplight():
 
     # Metrics (dashboard)
     metrics = [
+        {"name": "Tape (live)", "value": f"Avg {fmt_num(tape_avg,2)}%", "delta": f"SPY {fmt_num(tape.get('spy'),2)} | QQQ {fmt_num(tape.get('qqq'),2)} | DIA {fmt_num(tape.get('dia'),2)}"},
         {"name": "Regime", "value": regime, "delta": f"Stoplight: {light} | Leverage: {leverage_regime}"},
         {"name": "Net", "value": str(int(net)), "delta": f"Trend: {trend_score} | Risk: {risk} | Macro flags: {macro_flags}"},
+        {"name": "Tape (live)", "value": f"Avg {fmt_num(tape_avg,2)}%", "delta": f"SPY {fmt_num(tape.get('spy'),2)} | QQQ {fmt_num(tape.get('qqq'),2)} | DIA {fmt_num(tape.get('dia'),2)}"},
         {"name": "VIX", "value": fmt_num(vix["last"], 2), "delta": f"5D {fmt_delta(vix['d5'], 2)} | Pctl90D {fmt_num(vix_pct, 0)}"},
         {"name": "HY Spread", "value": fmt_num(hy["last"], 2), "delta": f"5D {fmt_delta(hy['d5'], 2)}"},
         {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"5D {fmt_delta(y10['d5'], 2)}"},
