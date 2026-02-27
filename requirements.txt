@@ -3,3 +3,4 @@ uvicorn
 requests
 pandas
 numpy
+yfinance
