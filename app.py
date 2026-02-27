@@ -195,6 +195,27 @@ def compute_stoplight():
     ndx_50 = sma(ndx, 50)
     ndx_200 = sma(ndx, 200)
 
+    # --- Volatility / Leverage Regime ---
+
+    # VIX 90-day percentile
+    vix_window = get_fred_series_window("VIXCLS", n=90)
+    vix_pct = percentile_rank(vix_window, vix["last"])
+
+    # SPX ATR expansion (10-day vs 30-day baseline)
+    spx_atr_10 = atr(spx, 10)
+    spx_atr_30 = atr(spx, 30)
+
+    atr_expansion = False
+    if not np.isnan(spx_atr_10) and not np.isnan(spx_atr_30):
+        atr_expansion = spx_atr_10 > spx_atr_30 * 1.15  # 15% expansion
+
+    # NDX 5-day momentum acceleration
+    ndx_mom_5 = pct_change(ndx, 5)
+    ndx_mom_21 = pct_change(ndx, 21)
+
+    momentum_accel = False
+    if not np.isnan(ndx_mom_5) and not np.isnan(ndx_mom_21):
+        momentum_accel = ndx_mom_5 > ndx_mom_21
     # Trend score (+ supports risk-on; - supports risk-off)
     trend_score = 0
     if not np.isnan(spx_last) and not np.isnan(spx_50):
@@ -393,7 +414,7 @@ def homepage():
 
     <div class="chips">
       <div class="k">Levers (menu, not advice)</div>
-      {''.join([f'<span class="chip">{c}</span>' for c in data["chips"]])}
+      {' '.join([f'<span class="chip">{c}</span>' for c in data["chips"]])}
     </div>
 
     <div class="foot">Updated: {data["timestamp"]}</div>
