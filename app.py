@@ -18,7 +18,63 @@ def _safe_get_json(url, params=None, timeout=12):
     r = requests.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
+# ---------------------------
+# LIVE TAPE (Yahoo quotes) helpers — no key
+# ---------------------------
 
+def _safe_get_json_allow_text(url, params=None, timeout=10):
+    """
+    Some endpoints (Yahoo) occasionally return non-JSON (HTML, empty, etc).
+    Return dict on success; {} on failure.
+    """
+    try:
+        r = requests.get(url, params=params, timeout=timeout, headers={
+            # Header reduces simple bot blocks; still not guaranteed.
+            "User-Agent": "Mozilla/5.0"
+        })
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {}
+
+def get_yahoo_quotes(symbols):
+    """
+    Fetch Yahoo quote data for a list of tickers.
+    Returns dict: { "SPY": <quote_dict or None>, ... }
+    """
+    if not symbols:
+        return {}
+
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    params = {"symbols": ",".join(symbols)}
+
+    j = _safe_get_json_allow_text(url, params=params, timeout=10)
+    results = (((j or {}).get("quoteResponse") or {}).get("result")) or []
+
+    out = {}
+    for q in results:
+        sym = q.get("symbol")
+        if sym:
+            out[sym.upper()] = q
+    # ensure keys exist even if missing
+    for s in symbols:
+        out.setdefault(s.upper(), None)
+    return out
+
+def pick_pct(quote):
+    """
+    From a Yahoo quote dict, return regularMarketChangePercent as float.
+    If missing, return np.nan.
+    """
+    try:
+        if not quote:
+            return np.nan
+        v = quote.get("regularMarketChangePercent", None)
+        if v is None:
+            return np.nan
+        return float(v)
+    except Exception:
+        return np.nan
 
 # ---------------------------
 # FRED helpers
