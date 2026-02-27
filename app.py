@@ -600,8 +600,8 @@ def homepage():
     <div class="grid">
       <div class="panel">
         <div class="light"></div>
-        <div class="label">{data.get("light","YELLOW")}</div>
-        <div class="sub">Confidence: {data.get("confidence","NA")} · Risk points: {data.get("risk_points","NA")}</div>
+        <div class="label">{data.get("regime","NEUTRAL")}</div>
+        <div class="sub">Stoplight: {data.get("light","YELLOW")} · Confidence: {data.get("confidence","NA")} · Net: {data.get("net","NA")}</div>
 
         <div class="note">
           <div class="k">Interpretation (Why)</div>
