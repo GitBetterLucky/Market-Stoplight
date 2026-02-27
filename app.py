@@ -331,18 +331,29 @@ def build_interpretation(light, confidence, leverage_regime, chips, why):
 
 def get_yahoo_quotes(symbols):
     """
-    Returns dict: symbol -> quote dict
-    Uses Yahoo's public quote endpoint (best-effort; may rate limit).
+    Returns dict: SYMBOL -> quote dict (best-effort; may rate limit).
+    Uses Yahoo's public quote endpoint.
     """
     if isinstance(symbols, str):
         symbols = [symbols]
+
     url = "https://query1.finance.yahoo.com/v7/finance/quote"
     try:
-        j = _safe_get_json(url, params={"symbols": ",".join(symbols)}, timeout=8)
+        r = requests.get(
+            url,
+            params={"symbols": ",".join(symbols)},
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        r.raise_for_status()
+        j = r.json()
         results = j.get("quoteResponse", {}).get("result", [])
-        return {r.get("symbol"): r for r in results if r.get("symbol")}
+        out = {r.get("symbol", "").upper(): r for r in results if r.get("symbol")}
+        for s in symbols:
+            out.setdefault(s.upper(), None)
+        return out
     except Exception:
-        return {}
+        return {s.upper(): None for s in symbols}
 
 def pick_pct(q):
     """
@@ -351,7 +362,6 @@ def pick_pct(q):
     """
     if not q:
         return np.nan
-    # Yahoo fields (may be missing depending on time)
     pm = q.get("preMarketChangePercent", None)
     rm = q.get("regularMarketChangePercent", None)
     if pm is not None:
@@ -373,7 +383,6 @@ def tape_signal():
     vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
     avg = float(np.mean(vals)) if vals else np.nan
 
-    # bias bands (tune later)
     if not np.isnan(avg) and avg <= -0.80:
         bias = "BEAR"
     elif not np.isnan(avg) and avg >= 0.80:
