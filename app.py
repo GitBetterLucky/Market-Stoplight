@@ -329,3 +329,31 @@ def homepage():
 </body>
 </html>
 """
+def get_fred_series_df(series_id, limit=400):
+    url = "https://api.stlouisfed.org/fred/series/observations"
+    params = {
+        "series_id": series_id,
+        "api_key": FRED_KEY,
+        "file_type": "json",
+        "sort_order": "asc",
+        "limit": limit
+    }
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()["observations"]
+    df = pd.DataFrame(data)[["date","value"]]
+    df["date"] = pd.to_datetime(df["date"])
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna()
+    df = df.set_index("date").sort_index()
+    return df
+
+def pct_change(df, days):
+    if len(df) < days + 1:
+        return np.nan
+    return (df["value"].iloc[-1] / df["value"].iloc[-(days+1)] - 1) * 100
+
+def sma(df, window):
+    if len(df) < window:
+        return np.nan
+    return df["value"].rolling(window).mean().iloc[-1]
