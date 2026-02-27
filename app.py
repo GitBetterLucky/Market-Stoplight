@@ -22,8 +22,8 @@ def _safe_get_json(url, params=None, timeout=12):
 
 def get_fred_series_window(series_id: str, n: int = 20) -> pd.Series:
     """
-    Fetch last n observations (trading-day-ish) from FRED.
-    Returns a pandas Series of floats indexed by date string.
+    Fetch last n observations from FRED.
+    Returns a pandas Series of floats indexed by date string (oldest->newest).
     """
     if not FRED_KEY:
         raise RuntimeError("Missing FRED_API_KEY environment variable")
@@ -47,14 +47,39 @@ def get_fred_series_window(series_id: str, n: int = 20) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=float)
 
-    # oldest -> newest
-    df = df.sort_values("date")
-    s = pd.Series(df["value"].values, index=df["date"].values)
-    return s
+    df = df.sort_values("date")  # oldest -> newest
+    return pd.Series(df["value"].values, index=df["date"].values)
+
+def get_fred_series_df(series_id: str, limit: int = 600) -> pd.DataFrame:
+    """
+    Fetch last `limit` observations from FRED as a dataframe with columns: date, value (float).
+    Oldest->newest.
+    """
+    if not FRED_KEY:
+        raise RuntimeError("Missing FRED_API_KEY environment variable")
+
+    url = "https://api.stlouisfed.org/fred/series/observations"
+    params = {
+        "series_id": series_id,
+        "api_key": FRED_KEY,
+        "file_type": "json",
+        "sort_order": "desc",
+        "limit": limit,
+    }
+    j = _safe_get_json(url, params=params)
+    obs = j.get("observations", [])
+    df = pd.DataFrame(obs)
+    if df.empty:
+        return pd.DataFrame(columns=["date", "value"])
+
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["value"])
+    df = df.sort_values("date")  # oldest -> newest
+    return df[["date", "value"]].reset_index(drop=True)
 
 def series_stats(s: pd.Series):
     """
-    last value, 1-step delta, 5-step delta (approx 1 week of trading days)
+    last value, 1-step delta, 5-step delta (approx 1 week trading days)
     """
     if s is None or len(s) == 0:
         return {"last": np.nan, "d1": np.nan, "d5": np.nan}
@@ -63,6 +88,26 @@ def series_stats(s: pd.Series):
     d1 = float(last - s.iloc[-2]) if len(s) >= 2 else np.nan
     d5 = float(last - s.iloc[-6]) if len(s) >= 6 else np.nan
     return {"last": last, "d1": d1, "d5": d5}
+
+def pct_change(df: pd.DataFrame, lag: int = 1) -> float:
+    """
+    Percent change between last value and value `lag` steps back.
+    """
+    if df is None or df.empty or len(df) <= lag:
+        return np.nan
+    last = float(df["value"].iloc[-1])
+    prev = float(df["value"].iloc[-(lag + 1)])
+    if prev == 0:
+        return np.nan
+    return (last - prev) / prev * 100.0
+
+def sma(df: pd.DataFrame, window: int) -> float:
+    """
+    Simple moving average of last `window` observations (returns last SMA value).
+    """
+    if df is None or df.empty or len(df) < window:
+        return np.nan
+    return float(pd.Series(df["value"]).rolling(window).mean().iloc[-1])
 
 def get_coinbase_candles(product: str, start: datetime, end: datetime, granularity: int = 3600) -> pd.DataFrame:
     """
@@ -79,8 +124,7 @@ def get_coinbase_candles(product: str, start: datetime, end: datetime, granulari
     df = pd.DataFrame(j, columns=["time", "low", "high", "open", "close", "volume"])
     if df.empty:
         return df
-    df = df.sort_values("time")
-    return df
+    return df.sort_values("time")
 
 def crypto_return(product="BTC-USD", hours=24) -> float:
     """
@@ -93,7 +137,6 @@ def crypto_return(product="BTC-USD", hours=24) -> float:
     if df is None or df.empty or len(df) < 2:
         return 0.0
 
-    # Use first and last closes in window
     old = float(df.iloc[0]["close"])
     new = float(df.iloc[-1]["close"])
     if old == 0:
@@ -117,63 +160,96 @@ def fmt_delta(x, decimals=2, suffix=""):
 # ---------------------------
 
 def compute_stoplight():
-    # --- crypto ---
+    # --- pull crypto impulse ---
     btc_24 = crypto_return("BTC-USD", 24)
     eth_24 = crypto_return("ETH-USD", 24)
     btc_7d = crypto_return("BTC-USD", 24 * 7)
     eth_7d = crypto_return("ETH-USD", 24 * 7)
 
-    # --- macro levers from FRED ---
+    # --- pull macro stress levers from FRED ---
     vix_s = get_fred_series_window("VIXCLS", n=30)
+    hy_s  = get_fred_series_window("BAMLH0A0HYM2", n=30)
     y10_s = get_fred_series_window("DGS10", n=30)
-    hy_s  = get_fred_series_window("BAMLH0A0HYM2", n=60)
 
     vix = series_stats(vix_s)
-    y10 = series_stats(y10_s)
     hy  = series_stats(hy_s)
+    y10 = series_stats(y10_s)
 
-    # risk points (higher = worse)
+    # --- pull equity tape for trend regime ---
+    spx = get_fred_series_df("SP500", limit=600)
+    ndx = get_fred_series_df("NASDAQCOM", limit=600)
+
+    spx_last = float(spx["value"].iloc[-1]) if not spx.empty else np.nan
+    ndx_last = float(ndx["value"].iloc[-1]) if not ndx.empty else np.nan
+
+    spx_1d = pct_change(spx, 1)
+    spx_5d = pct_change(spx, 5)
+    spx_21d = pct_change(spx, 21)
+
+    ndx_1d = pct_change(ndx, 1)
+    ndx_5d = pct_change(ndx, 5)
+    ndx_21d = pct_change(ndx, 21)
+
+    spx_50 = sma(spx, 50)
+    spx_200 = sma(spx, 200)
+    ndx_50 = sma(ndx, 50)
+    ndx_200 = sma(ndx, 200)
+
+    # Trend score (+ supports risk-on; - supports risk-off)
+    trend_score = 0
+    if not np.isnan(spx_last) and not np.isnan(spx_50):
+        trend_score += 1 if spx_last > spx_50 else -1
+    if not np.isnan(spx_last) and not np.isnan(spx_200):
+        trend_score += 1 if spx_last > spx_200 else -1
+    if not np.isnan(ndx_last) and not np.isnan(ndx_50):
+        trend_score += 1 if ndx_last > ndx_50 else -1
+    if not np.isnan(ndx_last) and not np.isnan(ndx_200):
+        trend_score += 1 if ndx_last > ndx_200 else -1
+
+    # Risk scoring (your existing framework)
     risk = 0
     why = []
 
     # VIX level + jump
-    if vix["last"] >= 25:
-        risk += 2
-        why.append(f"VIX elevated ({fmt_num(vix['last'], 2)}).")
-    elif vix["last"] >= 20:
-        risk += 1
-        why.append(f"VIX moderately high ({fmt_num(vix['last'], 2)}).")
+    if not np.isnan(vix["last"]):
+        if vix["last"] >= 25:
+            risk += 2
+            why.append(f"VIX elevated ({fmt_num(vix['last'], 2)}).")
+        elif vix["last"] >= 20:
+            risk += 1
+            why.append(f"VIX moderately high ({fmt_num(vix['last'], 2)}).")
 
     if not np.isnan(vix["d5"]) and vix["d5"] >= 3.0:
         risk += 1
         why.append(f"VIX rising over ~5D ({fmt_delta(vix['d5'], 2)}).")
 
     # HY spread level + widening
-    if hy["last"] >= 5.0:
-        risk += 2
-        why.append(f"High-yield spreads wide ({fmt_num(hy['last'], 2)}).")
-    elif hy["last"] >= 4.0:
-        risk += 1
-        why.append(f"HY spreads drifting higher ({fmt_num(hy['last'], 2)}).")
+    if not np.isnan(hy["last"]):
+        if hy["last"] >= 5.0:
+            risk += 2
+            why.append(f"High-yield spreads wide ({fmt_num(hy['last'], 2)}).")
+        elif hy["last"] >= 4.0:
+            risk += 1
+            why.append(f"HY spreads drifting higher ({fmt_num(hy['last'], 2)}).")
 
     if not np.isnan(hy["d5"]) and hy["d5"] >= 0.25:
         risk += 1
         why.append(f"HY spreads widening over ~5D ({fmt_delta(hy['d5'], 2)}).")
 
     # 10Y yield shock (fast up moves tighten conditions)
-    if y10["last"] >= 4.75:
-        risk += 2
-        why.append(f"10Y yield high ({fmt_num(y10['last'], 2)}).")
-    elif y10["last"] >= 4.50:
-        risk += 1
-        why.append(f"10Y yield elevated ({fmt_num(y10['last'], 2)}).")
+    if not np.isnan(y10["last"]):
+        if y10["last"] >= 4.75:
+            risk += 2
+            why.append(f"10Y yield high ({fmt_num(y10['last'], 2)}).")
+        elif y10["last"] >= 4.50:
+            risk += 1
+            why.append(f"10Y yield elevated ({fmt_num(y10['last'], 2)}).")
 
     if not np.isnan(y10["d5"]) and y10["d5"] >= 0.25:
         risk += 1
         why.append(f"10Y moved up fast over ~5D ({fmt_delta(y10['d5'], 2)}).")
 
     # Crypto stress (your idea: crypto as risk appetite / stress proxy)
-    # Big down days count as risk; big up days slightly reduce risk.
     if btc_24 <= -3.0:
         risk += 1
         why.append(f"BTC down hard 24h ({fmt_num(btc_24, 2, '%')}).")
@@ -185,36 +261,30 @@ def compute_stoplight():
         risk -= 1
         why.append(f"BTC strong 24h ({fmt_num(btc_24, 2, '%')}) — risk appetite improving.")
 
-    # If ETH confirms BTC direction, treat that as “agreement”
     agree = (btc_24 * eth_24) > 0
-    if agree:
-        why.append("BTC/ETH agree on direction.")
-    else:
-        why.append("BTC/ETH diverge (lower signal quality).")
+    why.append("BTC/ETH agree on direction." if agree else "BTC/ETH diverge (lower signal quality).")
 
-    # Regime mapping
-    if risk <= 0:
+    # Use trend to offset (or add) risk a bit
+    net_risk = risk - trend_score  # trend_score positive reduces risk; negative increases it
+
+    # Regime mapping (based on net risk)
+    if net_risk <= 0:
         light = "GREEN"
-    elif risk <= 3:
+    elif net_risk <= 3:
         light = "YELLOW"
     else:
         light = "RED"
 
     # Confidence: how many independent “macro” levers are flashing risk?
     macro_flags = 0
-    if vix["last"] >= 20 or (not np.isnan(vix["d5"]) and vix["d5"] >= 3.0):
+    if (not np.isnan(vix["last"]) and vix["last"] >= 20) or (not np.isnan(vix["d5"]) and vix["d5"] >= 3.0):
         macro_flags += 1
-    if hy["last"] >= 4.0 or (not np.isnan(hy["d5"]) and hy["d5"] >= 0.25):
+    if (not np.isnan(hy["last"]) and hy["last"] >= 4.0) or (not np.isnan(hy["d5"]) and hy["d5"] >= 0.25):
         macro_flags += 1
-    if y10["last"] >= 4.50 or (not np.isnan(y10["d5"]) and y10["d5"] >= 0.25):
+    if (not np.isnan(y10["last"]) and y10["last"] >= 4.50) or (not np.isnan(y10["d5"]) and y10["d5"] >= 0.25):
         macro_flags += 1
 
-    if macro_flags >= 3:
-        confidence = "HIGH"
-    elif macro_flags == 2:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW"
+    confidence = "HIGH" if macro_flags >= 3 else ("MEDIUM" if macro_flags == 2 else "LOW")
 
     # “lever menu” (not advice, just quick mapping)
     if light == "GREEN":
@@ -230,13 +300,16 @@ def compute_stoplight():
         {"name": "VIX", "value": fmt_num(vix["last"], 2), "delta": f"1D {fmt_delta(vix['d1'], 2)} | 5D {fmt_delta(vix['d5'], 2)}"},
         {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"1D {fmt_delta(y10['d1'], 2)} | 5D {fmt_delta(y10['d5'], 2)}"},
         {"name": "HY Spread", "value": fmt_num(hy["last"], 2), "delta": f"1D {fmt_delta(hy['d1'], 2)} | 5D {fmt_delta(hy['d5'], 2)}"},
-        {"name": "Risk points", "value": str(risk), "delta": f"Macro flags: {macro_flags} | Signal: {'Agree' if agree else 'Mixed'}"},
+        {"name": "SPX", "value": fmt_num(spx_last, 2), "delta": f"5D {fmt_delta(spx_5d, 2, '%')} | 21D {fmt_delta(spx_21d, 2, '%')}"},
+        {"name": "NDX", "value": fmt_num(ndx_last, 2), "delta": f"5D {fmt_delta(ndx_5d, 2, '%')} | 21D {fmt_delta(ndx_21d, 2, '%')}"},
+        {"name": "Trend score", "value": str(int(trend_score)), "delta": f"SPX>50/200: {spx_last > spx_50 if not np.isnan(spx_50) else 'NA'}/{spx_last > spx_200 if not np.isnan(spx_200) else 'NA'}"},
+        {"name": "Net risk", "value": str(int(net_risk)), "delta": f"Raw risk: {risk} | Macro flags: {macro_flags} | Signal: {'Agree' if agree else 'Mixed'}"},
     ]
 
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "light": light,
-        "risk_points": int(risk),
+        "risk_points": int(net_risk),
         "confidence": confidence,
         "btc_24h": round(btc_24, 2),
         "eth_24h": round(eth_24, 2),
@@ -245,7 +318,7 @@ def compute_stoplight():
         "vix": vix,
         "y10": y10,
         "hy_spread": hy,
-        "why": why[:8],   # keep tight
+        "why": why[:8],
         "chips": chips,
         "metrics": metrics,
     }
@@ -264,7 +337,6 @@ def homepage():
     data = compute_stoplight()
     color = {"GREEN": "#0f0", "YELLOW": "#ff0", "RED": "#f00"}[data["light"]]
 
-    # Simple mobile-friendly HTML
     return f"""
 <!doctype html>
 <html>
@@ -298,7 +370,7 @@ def homepage():
     <h1>Market Stoplight</h1>
     <div class="light"></div>
     <div class="label">{data["light"]}</div>
-    <div class="sub">Confidence: {data["confidence"]} · Risk points: {data["risk_points"]}</div>
+    <div class="sub">Confidence: {data["confidence"]} · Net risk: {data["risk_points"]}</div>
 
     <div class="cards">
       {''.join([f'''
@@ -329,31 +401,3 @@ def homepage():
 </body>
 </html>
 """
-def get_fred_series_df(series_id, limit=400):
-    url = "https://api.stlouisfed.org/fred/series/observations"
-    params = {
-        "series_id": series_id,
-        "api_key": FRED_KEY,
-        "file_type": "json",
-        "sort_order": "asc",
-        "limit": limit
-    }
-    r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()["observations"]
-    df = pd.DataFrame(data)[["date","value"]]
-    df["date"] = pd.to_datetime(df["date"])
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df.dropna()
-    df = df.set_index("date").sort_index()
-    return df
-
-def pct_change(df, days):
-    if len(df) < days + 1:
-        return np.nan
-    return (df["value"].iloc[-1] / df["value"].iloc[-(days+1)] - 1) * 100
-
-def sma(df, window):
-    if len(df) < window:
-        return np.nan
-    return df["value"].rolling(window).mean().iloc[-1]
