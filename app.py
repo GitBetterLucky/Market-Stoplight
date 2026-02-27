@@ -95,7 +95,9 @@ def compute_stoplight():
 def status():
     return compute_stoplight()
 
-@app.get("/")
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
 def homepage():
     data = compute_stoplight()
     color = {"GREEN":"#0f0","YELLOW":"#ff0","RED":"#f00"}[data["light"]]
