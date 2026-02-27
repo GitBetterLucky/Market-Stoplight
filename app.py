@@ -497,3 +497,28 @@ def homepage():
     .wrap {{ max-width: 860px; margin:0 auto; padding:22px 16px 40px; }}
     .top {{ display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; align-items:baseline; }}
     .title {{ font-size: 22px; font-weight: 800; }}
+    .stamp {{ font-family:var(--mono); color:var(--muted2); font-size:12px; }}
+    .grid {{ display:grid; grid-template-columns: 280px 1fr; gap:14px; margin-top:14px; }}
+    @media(max-width:760px){{ .grid{{grid-template-columns:1fr;}} }}
+    .panel {{ background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:16px; }}
+    .light {{ width:210px; height:210px; border-radius:50%; margin:6px auto 10px; background:var(--accent); box-shadow:0 0 0 8px rgba(255,255,255,.06); }}
+    .label {{ text-align:center; font-size:28px; font-weight:900; letter-spacing:1px; }}
+    .sub {{ text-align:center; margin-top:6px; color:var(--muted); }}
+    .k {{ color:var(--muted2); font-size:12px; letter-spacing:.10em; text-transform:uppercase; margin-bottom:8px; }}
+    .cards {{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; }}
+    @media(max-width:760px){{ .cards{{grid-template-columns:1fr;}} }}
+    .card {{ border:1px solid var(--border); border-radius:14px; padding:12px; background:rgba(0,0,0,.14); }}
+    .row {{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }}
+    .val {{ font-size:18px; font-weight:800; }}
+    .delta {{ font-family:var(--mono); font-size:12px; color:var(--muted); text-align:right; }}
+    ul {{ margin:6px 0 0 18px; color:var(--muted); line-height:1.45; }}
+    .chip {{ display:inline-block; margin:6px 6px 0 0; padding:7px 10px; border-radius:999px; border:1px solid var(--border); background:rgba(0,0,0,.12); font-size:13px; }}
+    .headline {{ font-size:16px; font-weight:800; margin-bottom:8px; }}
+    .note {{ margin-top:12px; color:var(--muted2); font-size:12px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="title">Market Stoplight</div>
+      <div class="
