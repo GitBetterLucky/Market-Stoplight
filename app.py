@@ -30,7 +30,6 @@ def get_fred_series_window(series_id: str, n: int = 120) -> pd.Series:
     Returns pandas Series of floats indexed by date (ascending).
     """
     if not FRED_KEY:
-        # Don’t crash the whole app if env var missing—return empty series
         return pd.Series(dtype=float)
 
     url = "https://api.stlouisfed.org/fred/series/observations"
@@ -381,7 +380,7 @@ def compute_stoplight():
         elif btc_24 >= 4.0:
             risk -= 1
 
-    if not agree and (not np.isnan(btc_24) and not np.isnan(eth_24)):
+    if (not np.isnan(btc_24) and not np.isnan(eth_24)) and (not agree):
         risk += 1
 
     net = trend_score - risk
@@ -429,6 +428,7 @@ def compute_stoplight():
         {"name": "Net", "value": str(net), "delta": f"Risk: {risk} | Macro flags: {macro_flags} | Crypto agree: {agree}"},
     ]
 
+    # IMPORTANT: add top-level 'why' and 'chips' so the UI can’t KeyError.
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "light": light,
@@ -440,6 +440,8 @@ def compute_stoplight():
         "leverage_regime": leverage_regime,
         "metrics": metrics,
         "interpretation": interpretation,
+        "why": interpretation.get("why", []),
+        "chips": interpretation.get("lever_menu", []),
     }
 
 
@@ -454,27 +456,37 @@ def status():
 
 @app.get("/", response_class=HTMLResponse)
 def homepage():
-    data = compute_stoplight()
-    light = data["light"]
-    color = {"GREEN": "#2ee59d", "YELLOW": "#ffd166", "RED": "#ff5c7a"}[light]
-    interp = data["interpretation"]
+    # Don’t ever 500 the UI; show error in-page instead.
+    try:
+        data = compute_stoplight()
+    except Exception as e:
+        data = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "light": "YELLOW",
+            "confidence": "LOW",
+            "risk_points": "NA",
+            "metrics": [],
+            "chips": [],
+            "why": [f"compute_stoplight error: {type(e).__name__}: {e}"],
+        }
+
+    light = data.get("light", "YELLOW")
+    color = {"GREEN": "#2ee59d", "YELLOW": "#ffd166", "RED": "#ff5c7a"}.get(light, "#ffd166")
 
     cards_html = "".join([
         f"""
         <div class="card">
-          <div class="k">{m["name"]}</div>
+          <div class="k">{m.get("name","")}</div>
           <div class="row">
-            <div class="val">{m["value"]}</div>
-            <div class="delta">{m["delta"]}</div>
+            <div class="val">{m.get("value","")}</div>
+            <div class="delta">{m.get("delta","")}</div>
           </div>
         </div>
-        """ for m in data["metrics"]
+        """ for m in data.get("metrics", [])
     ])
 
-    why_html = "".join([f"<li>{x}</li>" for x in interp["why"]])
-    menu_html = "".join([f'<span class="chip">{x}</span>' for x in interp["lever_menu"]])
-    what_html = "".join([f"<li>{x}</li>" for x in interp["what_it_means"]])
-    watch_html = "".join([f"<li>{x}</li>" for x in interp["watchouts"]])
+    why_html = "".join([f"<li>{x}</li>" for x in data.get("why", [])])
+    menu_html = "".join([f'<span class="chip">{x}</span>' for x in data.get("chips", [])])
 
     return f"""
 <!doctype html>
@@ -521,19 +533,19 @@ def homepage():
   <div class="wrap">
     <div class="top">
       <div class="title">Market Stoplight</div>
-      <div class="stamp">Updated: {data["timestamp"]}</div>
+      <div class="stamp">Updated: {data.get("timestamp","")}</div>
     </div>
 
     <div class="grid">
       <div class="panel">
         <div class="light"></div>
-        <div class="label">{data["light"]}</div>
-        <div class="sub">Confidence: {data["confidence"]} · Risk points: {data["risk_points"]}</div>
+        <div class="label">{data.get("light","YELLOW")}</div>
+        <div class="sub">Confidence: {data.get("confidence","NA")} · Risk points: {data.get("risk_points","NA")}</div>
 
         <div class="note">
-          <div class="k">Interpretation</div>
+          <div class="k">Interpretation (Why)</div>
           <ul>
-            {''.join([f"<li>{w}</li>" for w in data["why"]])}
+            {why_html}
           </ul>
         </div>
       </div>
@@ -541,20 +553,12 @@ def homepage():
       <div class="panel">
         <div class="headline">Dashboard</div>
         <div class="cards">
-          {''.join([f'''
-          <div class="card">
-            <div class="k">{m["name"]}</div>
-            <div class="row">
-              <div class="val">{m["value"]}</div>
-              <div class="delta">{m["delta"]}</div>
-            </div>
-          </div>
-          ''' for m in data["metrics"]])}
+          {cards_html}
         </div>
 
         <div style="margin-top:14px;">
           <div class="k">Levers (menu, not advice)</div>
-          {''.join([f'<span class="chip">{c}</span>' for c in data["chips"]])}
+          {menu_html}
         </div>
 
         <div class="note">
