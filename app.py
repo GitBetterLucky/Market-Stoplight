@@ -490,12 +490,6 @@ def compute_stoplight():
 
     regime_idx = max(0, base_idx - tape_downgrade)
     regime = tiers[regime_idx]
-    
-    # Apply tape downgrade (one tier toward risk)
-    tiers = ["HIGH RISK", "ELEVATED RISK", "NEUTRAL", "LOW RISK", "NIRVANA"]
-    idx = tiers.index(regime)
-    idx = max(0, idx - tape_downgrade)
-    regime = tiers[idx]
 
     # ---------------------------
     # Stoplight color (subtitle)
