@@ -160,6 +160,8 @@ def atr_proxy_from_close(s: pd.Series, n: int) -> float:
     diffs = pd.Series(s).diff().abs()
     return float(diffs.rolling(n).mean().iloc[-1])
 
+def _yn(flag: bool):
+    return "Above" if flag else "Below"
 
 # ---------------------------
 # Coinbase crypto helpers
@@ -539,37 +541,31 @@ def compute_stoplight():
     else:
         chips = ["PSQ / SQQQ", "HIBS (aggressive)", "Reduce/avoid leverage", "Cash is a position"]
 
-    # Interpretation (“learn along the way”)
-    # Keep it short + stable. Add trend + stress summary + crypto as context.
+    # Interpretation (instructional + stable)
     why = []
 
-    # Trend summary
     why.append(
-        f"Trend score {trend_score}: "
-        f"SPX>50/200 {spx_above_50}/{spx_above_200}, "
-        f"NDX>50/200 {ndx_above_50}/{ndx_above_200}, "
-        f"DJIA>50/200 {dji_above_50}/{dji_above_200}."
+        f"Trend: score {trend_score}. "
+        f"SPX {_yn(spx_above_50)}/50d, {_yn(spx_above_200)}/200d · "
+        f"NDX {_yn(ndx_above_50)}/50d, {_yn(ndx_above_200)}/200d · "
+        f"DJIA {_yn(dji_above_50)}/50d, {_yn(dji_above_200)}/200d."
     )
 
-    # Stress summary
-    if len(why_points) == 0:
-        why.append("Stress gauges not flashing (VIX/credit/rates/vol expansion are contained).")
-    else:
-        why.extend(why_points[:4])  # don’t spam
+    if why_points:
+        why.extend(why_points[:2])
 
-    # Vol / momentum overlay
-    if not np.isnan(vix_pct):
-        why.append(f"VIX percentile ~90D: {fmt_num(vix_pct,0)} → percentile explains “relative fear” vs recent history.")
-    why.append("NDX momentum accel (5D > 21D)." if momentum_accel else "NDX momentum not accelerating (more chop risk).")
-
-    # Crypto context (explicitly not scored)
-    if not np.isnan(btc_24) and not np.isnan(eth_24):
-        why.append(
-            f"Crypto context (not scored): BTC {fmt_num(btc_24,2)}%/24h ({fmt_num(btc_7d,2)}%/7d), "
-            f"ETH {fmt_num(eth_24,2)}%/24h ({fmt_num(eth_7d,2)}%/7d), "
-            f"{'aligned' if crypto_agree else 'mixed'}."
+    why.extend(
+        explain_indicator_blocks(
+            vix=vix,
+            hy=hy,
+            y10=y10,
+            vix_pct=vix_pct,
+            atr_expansion=atr_expansion,
+            momentum_accel=momentum_accel,
+            agree=crypto_agree,
         )
-
+    )
+    
     # Metrics (dashboard)
     metrics = [
         {"name": "Tape (live)",
