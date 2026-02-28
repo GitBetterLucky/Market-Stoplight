@@ -514,6 +514,198 @@ def tape_signal_from_pct(pct: dict):
     return {"spy": spy, "qqq": qqq, "dia": dia, "avg": avg, "bias": bias}
 
 # ---------------------------
+# Historical sector backtest (A)
+# ---------------------------
+
+SECTOR_UNIVERSE = {
+    # broad / benchmark
+    "SPY": "S&P 500",
+    "QQQ": "Nasdaq 100",
+
+    # defensives
+    "XLP": "Staples",
+    "XLU": "Utilities",
+    "XLV": "Health Care",
+
+    # cyclicals / rate sensitive
+    "XLF": "Financials",
+    "XLI": "Industrials",
+
+    # geopolitics / shock buckets
+    "XLE": "Energy",
+    "ITA": "Aerospace & Defense",
+    "GLD": "Gold",
+    "SLV": "Silver",
+
+    # shipping proxy (imperfect, but common)
+    "BDRY": "Shipping (Dry Bulk)",
+}
+
+def _to_trading_day(index: pd.DatetimeIndex, dt: pd.Timestamp) -> pd.Timestamp | None:
+    """Map a calendar date to the next available trading day in the price index."""
+    if dt in index:
+        return dt
+    # next trading day
+    pos = index.searchsorted(dt)
+    if pos >= len(index):
+        return None
+    return index[pos]
+
+def yf_adjclose(tickers: list[str], start: str, end: str) -> pd.DataFrame:
+    """
+    Download Adj Close for tickers between start and end (YYYY-MM-DD).
+    Returns a DataFrame indexed by trading day.
+    """
+    data = yf.download(
+        tickers=tickers,
+        start=start,
+        end=end,
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+        group_by="ticker",
+    )
+    # Normalize to Adj Close DataFrame
+    if isinstance(data.columns, pd.MultiIndex):
+        out = {}
+        for t in tickers:
+            if (t, "Adj Close") in data.columns:
+                out[t] = data[(t, "Adj Close")]
+            elif (t, "Close") in data.columns:
+                out[t] = data[(t, "Close")]
+        df = pd.DataFrame(out)
+    else:
+        # single ticker shape
+        col = "Adj Close" if "Adj Close" in data.columns else "Close"
+        df = pd.DataFrame({tickers[0]: data[col]})
+    df = df.dropna(how="all")
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    return df
+
+def compute_forward_returns(
+    prices: pd.DataFrame,
+    event_dates: list[str],
+    horizons=(1, 5, 21),
+) -> pd.DataFrame:
+    """
+    prices: DataFrame of adj close prices, columns=tickers, index=trading days
+    event_dates: list of 'YYYY-MM-DD' strings (calendar dates; will snap to next trading day)
+    Returns a long DataFrame with rows = (event, ticker), cols = horizon returns (%).
+    """
+    px = prices.copy()
+    px = px.sort_index()
+    idx = px.index
+
+    # Precompute forward return matrices per horizon
+    fwd = {}
+    for h in horizons:
+        fwd[h] = (px.shift(-h) / px - 1.0) * 100.0
+
+    rows = []
+    for d in event_dates:
+        dt = pd.Timestamp(d)
+        tday = _to_trading_day(idx, dt)
+        if tday is None:
+            continue
+
+        for ticker in px.columns:
+            rec = {"event_date": d, "tday": tday.date().isoformat(), "ticker": ticker}
+            for h in horizons:
+                val = fwd[h].loc[tday, ticker] if (tday in fwd[h].index) else np.nan
+                rec[f"r{h}d"] = float(val) if pd.notna(val) else np.nan
+            rows.append(rec)
+
+    return pd.DataFrame(rows)
+
+def summarize_forward_returns(
+    fwd_long: pd.DataFrame,
+    benchmark: str = "SPY",
+    horizons=(1, 5, 21),
+) -> dict:
+    """
+    Produces per-ticker summary stats:
+      - median/mean return by horizon
+      - hit-rate (% positive)
+      - n (non-NA samples)
+      - excess vs benchmark (median)
+    """
+    if fwd_long is None or fwd_long.empty:
+        return {"error": "No forward returns computed", "tickers": []}
+
+    out = {"benchmark": benchmark, "tickers": []}
+
+    # benchmark medians for "excess" comparisons
+    bench = fwd_long[fwd_long["ticker"] == benchmark]
+    bench_median = {}
+    for h in horizons:
+        col = f"r{h}d"
+        bench_median[h] = float(np.nanmedian(bench[col].values)) if not bench.empty else np.nan
+
+    for ticker, g in fwd_long.groupby("ticker"):
+        item = {"ticker": ticker}
+        for h in horizons:
+            col = f"r{h}d"
+            vals = g[col].values.astype(float)
+            n = int(np.isfinite(vals).sum())
+            med = float(np.nanmedian(vals)) if n else np.nan
+            mean = float(np.nanmean(vals)) if n else np.nan
+            hit = float((vals[np.isfinite(vals)] > 0).mean() * 100.0) if n else np.nan
+            item[f"{h}d_median"] = med
+            item[f"{h}d_mean"] = mean
+            item[f"{h}d_hit_rate"] = hit
+            item[f"{h}d_n"] = n
+            # excess median vs benchmark
+            bm = bench_median.get(h, np.nan)
+            item[f"{h}d_excess_median_vs_{benchmark}"] = (med - bm) if (np.isfinite(med) and np.isfinite(bm)) else np.nan
+
+        out["tickers"].append(item)
+
+    # Sort: best “shock winners” by 5D excess median, then 21D
+    def _key(x):
+        a = x.get(f"5d_excess_median_vs_{benchmark}", np.nan)
+        b = x.get(f"21d_excess_median_vs_{benchmark}", np.nan)
+        a = -1e9 if not np.isfinite(a) else a
+        b = -1e9 if not np.isfinite(b) else b
+        return (a, b)
+
+    out["tickers"] = sorted(out["tickers"], key=_key, reverse=True)
+    return out
+
+def backtest_sectors_on_events(
+    event_dates: list[str],
+    universe: dict = SECTOR_UNIVERSE,
+    start: str | None = None,
+    end: str | None = None,
+    horizons=(1, 5, 21),
+    benchmark="SPY",
+) -> dict:
+    """
+    Convenience wrapper: downloads prices + computes forward returns + summarizes.
+    """
+    tickers = list(universe.keys())
+
+    # Default start/end: pad enough to compute 21D forward returns
+    if start is None:
+        # go back 10 years by default (you can tighten later)
+        start = (datetime.now() - timedelta(days=365 * 10)).date().isoformat()
+    if end is None:
+        end = (datetime.now() + timedelta(days=10)).date().isoformat()
+
+    prices = yf_adjclose(tickers, start=start, end=end)
+    fwd_long = compute_forward_returns(prices, event_dates=event_dates, horizons=horizons)
+    summary = summarize_forward_returns(fwd_long, benchmark=benchmark, horizons=horizons)
+
+    # attach labels + small metadata
+    for t in summary.get("tickers", []):
+        t["label"] = universe.get(t["ticker"], t["ticker"])
+
+    summary["event_dates"] = event_dates
+    summary["horizons"] = list(horizons)
+    summary["asof"] = datetime.now().isoformat(timespec="seconds")
+    return summary
+
+# ---------------------------
 # Formatting helpers
 # ---------------------------
 
