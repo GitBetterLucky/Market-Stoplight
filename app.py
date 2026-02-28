@@ -201,6 +201,72 @@ def crypto_return(product="BTC-USD", hours=24) -> float:
         return np.nan
     return (new - old) / old * 100.0
 
+# ---------------------------
+# Cross-asset + breadth helpers (Yahoo) — no key
+# ---------------------------
+
+def pick_last(quote):
+    """Return regularMarketPrice as float or NaN."""
+    try:
+        if not quote:
+            return np.nan
+        v = quote.get("regularMarketPrice", None)
+        return float(v) if v is not None else np.nan
+    except Exception:
+        return np.nan
+
+def ratio_momentum(a_last, b_last):
+    """
+    Simple ratio (a/b). Returns NaN if missing.
+    We’ll use this for proxies like RSP/SPY, HYG/LQD, IWM/SPY.
+    """
+    try:
+        if np.isnan(a_last) or np.isnan(b_last) or b_last == 0:
+            return np.nan
+        return float(a_last / b_last)
+    except Exception:
+        return np.nan
+
+def classify_ratio(r_now, r_ref, band=0.003):
+    """
+    Compare ratio now vs reference (e.g., yesterday or a slow MA later).
+    band ~0.3% default. Returns: 'UP', 'DOWN', 'FLAT', or 'NA'
+    """
+    if np.isnan(r_now) or np.isnan(r_ref) or r_ref == 0:
+        return "NA"
+    chg = (r_now / r_ref) - 1.0
+    if chg > band:
+        return "UP"
+    if chg < -band:
+        return "DOWN"
+    return "FLAT"
+
+def cross_asset_snapshot():
+    """
+    Pulls best-effort cross-asset proxies from Yahoo.
+    Returns dict with pct changes and ratio states.
+    """
+    syms = ["SPY","QQQ","DIA","RSP","IWM","HYG","LQD","UUP","GLD","USO","TLT","JPY=X"]
+    q = get_yahoo_quotes(syms)
+
+    # live pct (premarket if present, else regular)
+    pct = {s: pick_pct(q.get(s)) for s in syms}
+    last = {s: pick_last(q.get(s)) for s in syms}
+
+    # ratios (instant snapshot)
+    rsp_spy = ratio_momentum(last.get("RSP", np.nan), last.get("SPY", np.nan))
+    iwm_spy = ratio_momentum(last.get("IWM", np.nan), last.get("SPY", np.nan))
+    hyg_lqd = ratio_momentum(last.get("HYG", np.nan), last.get("LQD", np.nan))
+
+    return {
+        "pct": pct,
+        "last": last,
+        "ratios": {
+            "RSP/SPY": rsp_spy,
+            "IWM/SPY": iwm_spy,
+            "HYG/LQD": hyg_lqd,
+        }
+    }
 
 # ---------------------------
 # Formatting helpers
