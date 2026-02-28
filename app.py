@@ -455,7 +455,7 @@ def compute_stoplight():
     # Net score
     net = trend_score - risk
 
-        # ---------------------------
+    # ---------------------------
     # LIVE TAPE CHECK (Yahoo) — overlay only
     # Prevents "LOW RISK" headline on a day where index tape is clearly risk-off.
     # ---------------------------
