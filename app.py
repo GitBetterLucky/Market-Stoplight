@@ -21,61 +21,224 @@ def _safe_get_json(url, params=None, timeout=12):
     return r.json()
     
 # ---------------------------
-# Real-time quote helper (yfinance; best-effort, no key)
+# Regime 2.0 — pillar scoring (swing-first) + tape overlay
 # ---------------------------
 
-def _pct_from_yf(symbol: str) -> float:
+def _sgn(x):
+    if np.isnan(x):
+        return 0
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+def _banded_vs_zero(x, pos=0.30, neg=-0.30):
+    """Percent-change style inputs. Returns +1 / 0 / -1 with a small noise band."""
+    if np.isnan(x):
+        return 0
+    if x >= pos:
+        return 1
+    if x <= neg:
+        return -1
+    return 0
+
+def _ratio_trend(r, band=0.003):
     """
-    Returns % change for today.
-    Prefers pre/post if available, else regular market.
+    Ratios like RSP/SPY, IWM/SPY, HYG/LQD:
+    We don't have a ref series yet, so we infer trend from same-day relative moves:
+    - If numerator pct > denom pct by > band*100, call it UP
+    - Else DOWN if < -band*100, else FLAT
     """
-    try:
-        t = yf.Ticker(symbol)
+    return r  # placeholder if you later add MA/ref; keep function for evolution
 
-        # fast_info is lightweight; sometimes missing fields
-        fi = getattr(t, "fast_info", None) or {}
-        last = fi.get("last_price", None)
-        prev = fi.get("previous_close", None)
+def regime_2_0_scores(
+    # trend
+    spx_above_50, spx_above_200,
+    ndx_above_50, ndx_above_200,
+    dji_above_50, dji_above_200,
 
-        if last is not None and prev not in (None, 0):
-            return (float(last) / float(prev) - 1.0) * 100.0
+    # stress (levels + momentum)
+    vix_last, vix_pct, hy_spread_last, hy_spread_d5, y10_last, atr_expansion,
 
-        # fallback: 2 daily closes
-        hist = t.history(period="5d", interval="1d")
-        if hist is None or hist.empty or len(hist) < 2:
-            return np.nan
-        prev_close = float(hist["Close"].iloc[-2])
-        last_close = float(hist["Close"].iloc[-1])
-        if prev_close == 0:
-            return np.nan
-        return (last_close / prev_close - 1.0) * 100.0
-    except Exception:
-        return np.nan
+    # cross-asset pct
+    spy_pct, qqq_pct, dia_pct,
+    rsp_pct, iwm_pct,
+    hyg_pct, lqd_pct,
+    uup_pct, gld_pct, tlt_pct, uso_pct,
 
+    # overlays
+    tape_avg,
+):
+    scores = {
+        "trend": 0,
+        "participation": 0,
+        "liquidity": 0,
+        "stress": 0,
+        "tape": 0,
+    }
+    notes = []
 
-def tape_signal():
+    # ---------------------------
+    # Trend pillar (slow)
+    # ---------------------------
+    # 50d = tactical, 200d = structural
+    scores["trend"] += (1 if spx_above_50 else -1)
+    scores["trend"] += (1 if spx_above_200 else -1)
+
+    scores["trend"] += (1 if ndx_above_50 else -1)
+    scores["trend"] += (1 if ndx_above_200 else -1)
+
+    scores["trend"] += (1 if dji_above_50 else -1)
+    scores["trend"] += (1 if dji_above_200 else -1)
+
+    # normalize to a tighter band (-3..+3)
+    # (optional) compress: take sign of each index block
+    # leaving as-is for now because you already display trend_score
+
+    # ---------------------------
+    # Participation pillar (breadth/leadership)
+    # ---------------------------
+    # RSP vs SPY (broad market participation)
+    if not np.isnan(rsp_pct) and not np.isnan(spy_pct):
+        if (rsp_pct - spy_pct) >= 0.20:
+            scores["participation"] += 1
+            notes.append("Breadth: equal-weight leading (healthy participation).")
+        elif (rsp_pct - spy_pct) <= -0.20:
+            scores["participation"] -= 1
+            notes.append("Breadth: cap-weight leading (narrow leadership).")
+
+    # IWM vs SPY (risk appetite / liquidity)
+    if not np.isnan(iwm_pct) and not np.isnan(spy_pct):
+        if (iwm_pct - spy_pct) >= 0.20:
+            scores["participation"] += 1
+            notes.append("Leadership: small caps leading (risk appetite improving).")
+        elif (iwm_pct - spy_pct) <= -0.20:
+            scores["participation"] -= 1
+            notes.append("Leadership: small caps lagging (risk appetite fading).")
+
+    # ---------------------------
+    # Stress pillar (fear + funding + rates + vol expansion)
+    # ---------------------------
+    # VIX level & percentile
+    if not np.isnan(vix_last):
+        if vix_last >= 25:
+            scores["stress"] -= 2
+        elif vix_last >= 20:
+            scores["stress"] -= 1
+        elif vix_last <= 14:
+            scores["stress"] += 1
+
+    if not np.isnan(vix_pct):
+        if vix_pct >= 80:
+            scores["stress"] -= 1
+        elif vix_pct <= 30:
+            scores["stress"] += 1
+
+    # HY spread level + widening
+    if not np.isnan(hy_spread_last):
+        if hy_spread_last >= 5.0:
+            scores["stress"] -= 2
+        elif hy_spread_last >= 4.0:
+            scores["stress"] -= 1
+        elif hy_spread_last <= 3.5:
+            scores["stress"] += 1
+
+    if not np.isnan(hy_spread_d5) and hy_spread_d5 >= 0.25:
+        scores["stress"] -= 1
+
+    # 10Y too high pressures growth
+    if not np.isnan(y10_last):
+        if y10_last >= 4.75:
+            scores["stress"] -= 1
+        elif y10_last <= 3.75:
+            scores["stress"] += 1
+
+    # ATR expansion = choppier / worse for leverage
+    if atr_expansion:
+        scores["stress"] -= 1
+
+    # Credit tape (HYG vs LQD) — directional early-warning
+    if not np.isnan(hyg_pct) and not np.isnan(lqd_pct):
+        if hyg_pct < 0 and lqd_pct >= 0:
+            scores["stress"] -= 1
+            notes.append("Credit: high yield weaker than IG (funding stress creeping in).")
+        elif hyg_pct > 0 and lqd_pct <= 0:
+            scores["stress"] += 1
+            notes.append("Credit: high yield stronger than IG (risk appetite supported).")
+
+    # ---------------------------
+    # Liquidity / hedge pillar (USD, bonds, gold, oil as context)
+    # ---------------------------
+    # Strong USD up + stocks down often = tightening
+    if not np.isnan(uup_pct) and not np.isnan(spy_pct):
+        if uup_pct >= 0.50 and spy_pct < 0:
+            scores["liquidity"] -= 1
+            notes.append("Liquidity: dollar up while stocks down (tightening signal).")
+        elif uup_pct <= -0.50 and spy_pct > 0:
+            scores["liquidity"] += 1
+            notes.append("Liquidity: dollar down while stocks up (easing tailwind).")
+
+    # Flight-to-safety confirmation: SPY down + TLT up
+    if not np.isnan(tlt_pct) and not np.isnan(spy_pct):
+        if spy_pct < -0.30 and tlt_pct > 0.30:
+            scores["liquidity"] -= 1
+            notes.append("Positioning: bonds bid on equity weakness (defensive posture).")
+
+    # Gold up sharply on equity weakness = risk-off hedge demand (soft confirm)
+    if not np.isnan(gld_pct) and not np.isnan(spy_pct):
+        if spy_pct < -0.30 and gld_pct > 0.30:
+            scores["liquidity"] -= 1
+
+    # Oil sharp down can be growth scare (context only for now)
+    # (keep as note, not scoring, unless you want it to matter)
+    if not np.isnan(uso_pct) and uso_pct <= -1.0:
+        notes.append("Macro context: oil down hard (watch for growth-scare narratives).")
+
+    # ---------------------------
+    # Tape overlay (fast)
+    # ---------------------------
+    # This should not dominate swing regime, but should block leverage on ugly days.
+    if not np.isnan(tape_avg):
+        if tape_avg <= -0.80:
+            scores["tape"] -= 2
+            notes.append("Tape: broad index tape is risk-off today (avoid long leverage).")
+        elif tape_avg >= 0.80:
+            scores["tape"] += 1
+            notes.append("Tape: broad index tape is strong today (risk-on follow-through more likely).")
+
+    return scores, notes
+
+def regime_2_0_net(scores):
     """
-    Simple 'tape' score based on SPY/QQQ/DIA % change.
-    Uses cross_asset_snapshot() so the whole app uses one data source.
+    Swing-first weights.
+    Tape is an overlay: it can downgrade, but shouldn't overpower a healthy swing regime.
     """
-    xa = cross_asset_snapshot()
-    pct = xa.get("pct", {})
+    trend = scores.get("trend", 0)
+    participation = scores.get("participation", 0)
+    stress = scores.get("stress", 0)
+    liquidity = scores.get("liquidity", 0)
+    tape = scores.get("tape", 0)
 
-    spy = pct.get("SPY", np.nan)
-    qqq = pct.get("QQQ", np.nan)
-    dia = pct.get("DIA", np.nan)
+    # weights
+    net = (
+        0.45 * trend +
+        0.20 * participation +
+        0.20 * (liquidity) +
+        0.35 * (stress) +
+        0.30 * (tape)
+    )
+    return int(round(net))
 
-    vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
-    avg = float(np.mean(vals)) if vals else np.nan
-
-    if not np.isnan(avg) and avg <= -0.80:
-        bias = "BEAR"
-    elif not np.isnan(avg) and avg >= 0.80:
-        bias = "BULL"
-    else:
-        bias = "NEUTRAL"
-
-    return {"spy": spy, "qqq": qqq, "dia": dia, "avg": avg, "bias": bias}
+def stoplight_5_tier(net):
+    """
+    Returns: light (color), tier (label), icon (emoji or token)
+    """
+    if net <= -5:
+        return "RED", "HIGH RISK", "🛑"
+    if net <= -2:
+        return "ORANGE", "ELEVATED RISK", "⚠️"
+    if net <= 1:
+        return "YELLOW", "NEUTRAL", "🟡"
+    if net <= 4:
+        return "GREEN", "LOW RISK", "🟢"
+    return "SUN", "NIRVANA", "🌞"
     
 # ---------------------------
 # FRED helpers
@@ -332,6 +495,27 @@ def cross_asset_snapshot():
         }
     }
 
+def tape_signal_from_pct(pct: dict):
+    """
+    Tape score using already-fetched cross-asset pct dict.
+    Avoids double Yahoo pull.
+    """
+    spy = pct.get("SPY", np.nan)
+    qqq = pct.get("QQQ", np.nan)
+    dia = pct.get("DIA", np.nan)
+
+    vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
+    avg = float(np.mean(vals)) if vals else np.nan
+
+    if not np.isnan(avg) and avg <= -0.80:
+        bias = "BEAR"
+    elif not np.isnan(avg) and avg >= 0.80:
+        bias = "BULL"
+    else:
+        bias = "NEUTRAL"
+
+    return {"spy": spy, "qqq": qqq, "dia": dia, "avg": avg, "bias": bias}
+
 # ---------------------------
 # Formatting helpers
 # ---------------------------
@@ -353,76 +537,66 @@ def fmt_delta(x, decimals=2, suffix=""):
 # Interpretation helpers
 # ---------------------------
 
-def explain_indicator_blocks(vix, hy, y10, vix_pct, atr_expansion, momentum_accel, agree):
-    """
-    Clean, instructional 'Why' lines.
-    Order is stable:
-    1) Stress snapshot
-    2) What that means
-    3) Trend/vol/momentum overlays
-    4) Crypto context (explicitly not scored)
-    """
+def build_why_2_0(trend_score, spx_above_50, spx_above_200, ndx_above_50, ndx_above_200, dji_above_50, dji_above_200,
+                 scores, notes, vix_last, vix_pct, hy_spread_last, y10_last, atr_expansion,
+                 rsp_pct, spy_pct, iwm_pct, hyg_pct, lqd_pct, uup_pct, gld_pct, tlt_pct,
+                 btc_24, btc_7d, eth_24, eth_7d, crypto_agree):
     why = []
 
-    # --- 1) Stress snapshot (numbers first, compact) ---
-    vix_last = vix.get("last", np.nan)
-    hy_last  = hy.get("last", np.nan)
-    y10_last = y10.get("last", np.nan)
+    # 1) One clean trend line
+    why.append(
+        f"Trend: score {trend_score}. "
+        f"SPX {'Y' if spx_above_50 else 'N'}/50d, {'Y' if spx_above_200 else 'N'}/200d · "
+        f"NDX {'Y' if ndx_above_50 else 'N'}/50d, {'Y' if ndx_above_200 else 'N'}/200d · "
+        f"DJIA {'Y' if dji_above_50 else 'N'}/50d, {'Y' if dji_above_200 else 'N'}/200d."
+    )
 
-    stress_bits = []
+    # 2) Regime mechanics (relationship explanations)
+    if not np.isnan(rsp_pct) and not np.isnan(spy_pct):
+        if rsp_pct > spy_pct:
+            why.append("Breadth: equal-weight outperforming → participation broadening (healthier risk-on).")
+        else:
+            why.append("Breadth: cap-weight leading → narrow leadership (more fragile risk-on).")
+
+    if not np.isnan(iwm_pct) and not np.isnan(spy_pct):
+        if iwm_pct > spy_pct:
+            why.append("Leadership: small caps leading → liquidity/risk appetite improving.")
+        else:
+            why.append("Leadership: small caps lagging → liquidity cautious (risk-on less durable).")
+
+    if not np.isnan(hyg_pct) and not np.isnan(lqd_pct):
+        if hyg_pct > lqd_pct:
+            why.append("Credit: high yield stronger than IG → funding conditions supportive.")
+        else:
+            why.append("Credit: high yield weaker than IG → funding stress can bleed into equities.")
+
+    if not np.isnan(uup_pct) and not np.isnan(spy_pct):
+        if uup_pct > 0 and spy_pct < 0:
+            why.append("Liquidity: dollar up while stocks down → tightening backdrop (risk-off bias).")
+        elif uup_pct < 0 and spy_pct > 0:
+            why.append("Liquidity: dollar down while stocks up → easing tailwind (risk-on bias).")
+
+    if not np.isnan(tlt_pct) and not np.isnan(spy_pct):
+        if spy_pct < 0 and tlt_pct > 0:
+            why.append("Positioning: bonds bid on equity weakness → defensive positioning active.")
+
+    # 3) Stress snapshot (keep short)
     if not np.isnan(vix_last):
-        stress_bits.append(f"VIX {fmt_num(vix_last,2)} (pctl {fmt_num(vix_pct,0)})")
-    if not np.isnan(hy_last):
-        stress_bits.append(f"HY {fmt_num(hy_last,2)}")
-    if not np.isnan(y10_last):
-        stress_bits.append(f"10Y {fmt_num(y10_last,2)}")
-    stress_bits.append("ATR expanding" if atr_expansion else "ATR stable")
+        why.append(f"Stress snapshot: VIX {fmt_num(vix_last,2)} (pctl {fmt_num(vix_pct,0)}), HY {fmt_num(hy_spread_last,2)}, 10Y {fmt_num(y10_last,2)}. "
+                   f"{'ATR expanding' if atr_expansion else 'ATR stable'}.")
 
-    why.append("Stress snapshot: " + " · ".join(stress_bits) + ".")
+    # 4) Add best notes (already relationship-based)
+    for n in notes[:4]:
+        if n not in why:
+            why.append(n)
 
-    # --- 2) What it means (teach the user) ---
-    # VIX interpretation (absolute + relative)
-    if not np.isnan(vix_last):
-        if vix_last >= 25:
-            why.append("Meaning: volatility is elevated — expect whipsaw; leverage is less forgiving.")
-        elif vix_last >= 20:
-            why.append("Meaning: volatility is mildly elevated — expect chop; smaller size helps.")
-        else:
-            why.append("Meaning: volatility is calm — easier environment for multi-day holds *if* trend supports it.")
-
-    if not np.isnan(vix_pct):
-        if vix_pct >= 80:
-            why.append("Meaning: VIX is high vs recent history — decay/whipsaw risk rises even if trend looks OK.")
-        elif vix_pct <= 30:
-            why.append("Meaning: VIX is low vs recent history — conditions are friendlier for leverage (trend still matters).")
-
-    # HY / rates: keep it short and practical
-    if not np.isnan(hy_last):
-        if hy_last >= 5.0:
-            why.append("Meaning: credit stress is rising — equity drawdowns can accelerate.")
-        elif hy_last >= 4.0:
-            why.append("Meaning: credit is mildly risk-off — keep expectations tight.")
-        else:
-            why.append("Meaning: credit looks contained — not a major headwind today.")
-
-    if not np.isnan(y10_last):
-        if y10_last >= 4.75:
-            why.append("Meaning: rates are high — can pressure growth/tech multiples.")
-        elif y10_last >= 4.50:
-            why.append("Meaning: rates are elevated — watch for renewed tightening impulse.")
-        else:
-            why.append("Meaning: rates aren’t the main stress signal today.")
-
-    # --- 3) Tactical overlays (momentum is direction, ATR is path) ---
-    why.append("Path: volatility expanding → expect bigger intraday swings." if atr_expansion
-               else "Path: volatility stable → trend-following behaves better.")
-
-    why.append("Direction: NDX momentum improving (5D > 21D)." if momentum_accel
-               else "Direction: NDX momentum not improving → higher chop risk.")
-
-    # --- 4) Crypto context (explicitly not scored) ---
-    why.append("Crypto context: BTC/ETH aligned (not scored)." if agree
-               else "Crypto context: BTC/ETH mixed (not scored).")
+    # 5) Crypto context (not scored)
+    if not np.isnan(btc_24) and not np.isnan(eth_24):
+        why.append(
+            f"Crypto context (not scored): BTC {fmt_num(btc_24,2)}%/24h ({fmt_num(btc_7d,2)}%/7d), "
+            f"ETH {fmt_num(eth_24,2)}%/24h ({fmt_num(eth_7d,2)}%/7d), "
+            f"{'aligned' if crypto_agree else 'mixed'}."
+        )
 
     return why[:10]
 
@@ -540,93 +714,19 @@ def compute_stoplight():
     eth_7d = crypto_return("ETH-USD", 24 * 7)
     crypto_agree = (not np.isnan(btc_24) and not np.isnan(eth_24) and (btc_24 * eth_24) > 0)
 
-    # Risk scoring (NO CRYPTO)
-    risk = 0
-    macro_flags = 0
-    why_points = []  # short “scoring reasons” + human learning
-
-    # VIX
-    if not np.isnan(vix["last"]):
-        if vix["last"] >= 30:
-            risk += 3; macro_flags += 1
-            why_points.append(f"VIX very high ({fmt_num(vix['last'],2)}) → markets pricing fear; leverage gets punished.")
-        elif vix["last"] >= 25:
-            risk += 2; macro_flags += 1
-            why_points.append(f"VIX elevated ({fmt_num(vix['last'],2)}) → more chop/whipsaw risk.")
-        elif vix["last"] >= 20:
-            risk += 1; macro_flags += 1
-            why_points.append(f"VIX above ‘calm’ ({fmt_num(vix['last'],2)}) → leverage less forgiving.")
-
-    if not np.isnan(vix["d5"]) and vix["d5"] >= 3.0:
-        risk += 1
-        why_points.append(f"VIX rising ~5D ({fmt_delta(vix['d5'],2)}) → stress increasing.")
-        macro_flags = max(macro_flags, 1)
-
-    # HY Spreads
-    if not np.isnan(hy["last"]):
-        if hy["last"] >= 6.0:
-            risk += 3; macro_flags += 1
-            why_points.append(f"HY spreads very wide ({fmt_num(hy['last'],2)}) → credit stress; equities can follow down.")
-        elif hy["last"] >= 5.0:
-            risk += 2; macro_flags += 1
-            why_points.append(f"HY spreads wide ({fmt_num(hy['last'],2)}) → risk-off from credit.")
-        elif hy["last"] >= 4.0:
-            risk += 1; macro_flags += 1
-            why_points.append(f"HY spreads creeping up ({fmt_num(hy['last'],2)}) → mild credit caution.")
-
-    if not np.isnan(hy["d5"]) and hy["d5"] >= 0.25:
-        risk += 1
-        why_points.append(f"HY widening ~5D ({fmt_delta(hy['d5'],2)}) → funding stress rising.")
-        macro_flags = max(macro_flags, 1)
-
-    # 10Y
-    if not np.isnan(y10["last"]):
-        if y10["last"] >= 4.75:
-            risk += 2; macro_flags += 1
-            why_points.append(f"10Y high ({fmt_num(y10['last'],2)}) → tight conditions; tech/growth headwind.")
-        elif y10["last"] >= 4.50:
-            risk += 1; macro_flags += 1
-            why_points.append(f"10Y elevated ({fmt_num(y10['last'],2)}) → watch for further tightening.")
-
-    if not np.isnan(y10["d5"]) and y10["d5"] >= 0.25:
-        risk += 1
-        why_points.append(f"10Y rising fast ~5D ({fmt_delta(y10['d5'],2)}) → tightening impulse.")
-        macro_flags = max(macro_flags, 1)
-
-    # Volatility expansion (proxy)
-    if atr_expansion:
-        risk += 1
-        why_points.append("SPX vol expanding (ATR proxy up) → whipsaw/decay risk higher for leverage.")
-
-    # Net score
-    net = trend_score - risk
-
     # ---------------------------
-    # LIVE TAPE CHECK (Yahoo) — overlay only
-    # Prevents "LOW RISK" headline on a day where index tape is clearly risk-off.
-    # ---------------------------
-    tape = tape_signal()
-    tape_avg = tape.get("avg", np.nan)
-    tape_bias = tape.get("bias", "NEUTRAL")
-
-    tape_downgrade = 0
-    if not np.isnan(tape_avg) and tape_avg <= -0.80:
-        tape_downgrade = 1
-        why_points.insert(
-            0,
-            f"Tape risk-off (SPY/QQQ/DIA avg {fmt_num(tape_avg,2)}%) → avoid long leverage today."
-        )
-
-    # ---------------------------
-    # Cross-asset snapshot (Yahoo) — used for scoring + interpretation
+    # LIVE TAPE + CROSS-ASSET (Yahoo)
     # ---------------------------
     xa = cross_asset_snapshot()
     pct = xa.get("pct", {})
-    ratios = xa.get("ratios", {})
+    
+    tape = tape_signal_from_pct(pct)
+    tape_avg = tape.get("avg", np.nan)
 
-    # Convenience
-    rsp_pct = pct.get("RSP", np.nan)
     spy_pct = pct.get("SPY", np.nan)
+    qqq_pct = pct.get("QQQ", np.nan)
+    dia_pct = pct.get("DIA", np.nan)
+    rsp_pct = pct.get("RSP", np.nan)
     iwm_pct = pct.get("IWM", np.nan)
     hyg_pct = pct.get("HYG", np.nan)
     lqd_pct = pct.get("LQD", np.nan)
@@ -636,150 +736,58 @@ def compute_stoplight():
     uso_pct = pct.get("USO", np.nan)
 
     # ---------------------------
-    # Structural add-ons (breadth + credit proxy + USD risk)
+    # Regime 2.0 scoring
     # ---------------------------
-    structural_risk = 0
-    structural_notes = []
+    scores, notes = regime_2_0_scores(
+        spx_above_50, spx_above_200,
+        ndx_above_50, ndx_above_200,
+        dji_above_50, dji_above_200,
+        vix["last"], vix_pct, hy["last"], hy["d5"], y10["last"], atr_expansion,
+        spy_pct, qqq_pct, dia_pct,
+        rsp_pct, iwm_pct,
+        hyg_pct, lqd_pct,
+        uup_pct, gld_pct, tlt_pct, uso_pct,
+        tape_avg,
+    )
 
-    # Breadth proxy: equal-weight (RSP) underperforming cap-weight (SPY) is a mild risk-off tell
-    if not np.isnan(rsp_pct) and not np.isnan(spy_pct):
-        if (rsp_pct - spy_pct) <= -0.30:
-            structural_risk += 1
-            structural_notes.append("Breadth weak (RSP < SPY) → fewer stocks carrying the index; leverage less forgiving.")
+    net = regime_2_0_net(scores)
 
-    # Small caps proxy: IWM dumping is another mild risk-off tell
-    if not np.isnan(iwm_pct) and iwm_pct <= -1.00:
-        structural_risk += 1
-        structural_notes.append("Small caps weak (IWM down) → risk appetite fading / tighter conditions bite.")
+    # 5-tier output
+    light, regime, icon = stoplight_5_tier(net)
 
-    # Credit proxy: HYG < LQD is risk-off
-    if not np.isnan(hyg_pct) and not np.isnan(lqd_pct):
-        if (hyg_pct - lqd_pct) <= -0.25:
-            structural_risk += 1
-            structural_notes.append("Credit risk-off (HYG < LQD) → junk underperforming; equities can wobble.")
-
-    # USD squeeze proxy: UUP up hard can pressure risk assets (esp. growth/EM/commodities)
-    if not np.isnan(uup_pct) and uup_pct >= 0.40:
-        structural_risk += 1
-        structural_notes.append("USD strong (UUP up) → risk assets often struggle in dollar-squeeze tape.")
-
-    # Apply structural risk to your existing risk score (keep it small so it’s an overlay, not a takeover)
-    if structural_risk > 0:
-        risk += min(structural_risk, 2)   # cap contribution
-        macro_flags = max(macro_flags, 1)
-        why_points.extend(structural_notes[:2])
-
-    # ---------------------------
-    # 5-tier regime (headline)
-    # ---------------------------
-    tiers = ["HIGH RISK", "ELEVATED RISK", "NEUTRAL", "LOW RISK", "NIRVANA"]
-
-    if net <= -5:
-        base_idx = 0
-    elif net <= -2:
-        base_idx = 1
-    elif net <= 1:
-        base_idx = 2
-    elif net <= 4:
-        base_idx = 3
-    else:
-        base_idx = 4
-
-    regime_idx = max(0, base_idx - tape_downgrade)
-    regime = tiers[regime_idx]
-
-    # ---------------------------
-    # Stoplight color (subtitle)
-    # ---------------------------
-
-    if net >= 2:
-        light = "GREEN"
-    elif net <= -2:
-        light = "RED"
-    else:
-        light = "YELLOW"
-
-    # Confidence (macro agreement)
-    if macro_flags >= 3:
+    # Optional: quick “confidence” heuristic (you can refine later)
+    # HIGH when signal is strong; MEDIUM when modest; LOW when close to neutral
+    if abs(net) >= 5:
         confidence = "HIGH"
-    elif macro_flags == 2:
+    elif abs(net) >= 3:
         confidence = "MEDIUM"
     else:
         confidence = "LOW"
 
-    # ---------------------------
-    # Structural add-ons (breadth + credit proxy)
-    # ---------------------------
-    structural_bonus = 0
+    # Leverage regime (simple + consistent with your new model)
+    leverage_regime = "FAVORABLE" if regime in ("LOW RISK", "NIRVANA") else ("UNFAVORABLE" if regime in ("HIGH RISK", "ELEVATED RISK") else "NEUTRAL")
 
-    # Breadth proxy: equal-weight underperforming is a warning (narrow leadership)
-    if not np.isnan(rsp_pct) and not np.isnan(spy_pct):
-        if (rsp_pct - spy_pct) <= -0.35:
-            structural_bonus -= 1
-            why_points.append("Breadth warning: equal-weight (RSP) lagging SPY → leadership narrow; rallies less stable.")
-        elif (rsp_pct - spy_pct) >= 0.20:
-            structural_bonus += 1
-            why_points.append("Breadth healthy: equal-weight (RSP) keeping up with SPY → participation improving.")
-
-    # Credit proxy: HYG lagging LQD = risk-off (credit cautious)
-    if not np.isnan(hyg_pct) and not np.isnan(lqd_pct):
-        if (hyg_pct - lqd_pct) <= -0.25:
-            structural_bonus -= 1
-            why_points.append("Credit caution: junk bonds (HYG) lag IG (LQD) → risk appetite slipping.")
-        elif (hyg_pct - lqd_pct) >= 0.15:
-            structural_bonus += 1
-            why_points.append("Credit supportive: HYG outperforming LQD → risk appetite healthier.")
-
-    # Small caps proxy: IWM lagging SPY often = tightening / risk-off under the surface
-    if not np.isnan(iwm_pct) and not np.isnan(spy_pct):
-        if (iwm_pct - spy_pct) <= -0.40:
-            structural_bonus -= 1
-            why_points.append("Risk breadth caution: small caps (IWM) lagging SPY → conditions less friendly for leverage.")
-
-    # Update net with structural add-ons (still not “tactical tape”)
-    net = net + structural_bonus
-    
-    # Leverage regime (useful overlay)
-    leverage_regime = "NEUTRAL"
-    if (not np.isnan(vix_pct) and vix_pct <= 50) and (not atr_expansion) and momentum_accel and trend_score >= 2 and macro_flags == 0:
-        leverage_regime = "FAVORABLE"
-    if (not np.isnan(vix_pct) and vix_pct >= 75) or atr_expansion or macro_flags >= 2 or trend_score <= -2:
-        leverage_regime = "UNFAVORABLE"
-
-    # Lever menu (still “menu, not advice”)
-    if regime in ["NIRVANA", "LOW RISK"]:
+    # Lever menu
+    if regime in ("NIRVANA", "LOW RISK"):
         chips = ["TQQQ", "NVDL", "AMDL", "CONL", "Single-name > broad if you’ll be offline"]
     elif regime == "NEUTRAL":
         chips = ["Smaller size", "Shorter holds", "Prefer single-name leverage", "Wait for confirmation"]
     else:
         chips = ["PSQ / SQQQ", "HIBS (aggressive)", "Reduce/avoid leverage", "Cash is a position"]
 
-    # Interpretation (instructional + stable)
-    why = []
-
-    why.append(
-        f"Trend: score {trend_score}. "
-        f"SPX {_yn(spx_above_50)}/50d, {_yn(spx_above_200)}/200d · "
-        f"NDX {_yn(ndx_above_50)}/50d, {_yn(ndx_above_200)}/200d · "
-        f"DJIA {_yn(dji_above_50)}/50d, {_yn(dji_above_200)}/200d."
+    # Why (new builder)
+    why = build_why_2_0(
+        trend_score,
+        spx_above_50, spx_above_200, ndx_above_50, ndx_above_200, dji_above_50, dji_above_200,
+        scores, notes,
+        vix["last"], vix_pct, hy["last"], y10["last"], atr_expansion,
+        rsp_pct, spy_pct, iwm_pct, hyg_pct, lqd_pct, uup_pct, gld_pct, tlt_pct,
+        btc_24, btc_7d, eth_24, eth_7d, crypto_agree
     )
 
-    if why_points:
-        why.extend(why_points[:2])
-
-    why.extend(
-        explain_indicator_blocks(
-            vix=vix,
-            hy=hy,
-            y10=y10,
-            vix_pct=vix_pct,
-            atr_expansion=atr_expansion,
-            momentum_accel=momentum_accel,
-            agree=crypto_agree,
-        )
-    )
-    
-      # Metrics (dashboard)
+    # ---------------------------
+    # Metrics (dashboard)
+    # ---------------------------
     metrics = [
         {
             "name": "Tape (live)",
@@ -792,13 +800,13 @@ def compute_stoplight():
         },
         {
             "name": "Regime",
-            "value": regime,
+            "value": f"{icon} {regime}",
             "delta": f"Stoplight: {light} | Leverage: {leverage_regime}",
         },
         {
             "name": "Net",
             "value": str(int(net)),
-            "delta": f"Trend: {trend_score} | Risk: {risk} | Macro flags: {macro_flags}",
+            "delta": f"Trend pillar: {scores.get('trend',0)} | Stress: {scores.get('stress',0)} | Tape: {scores.get('tape',0)}",
         },
         {
             "name": "VIX",
@@ -873,141 +881,10 @@ def compute_stoplight():
         "regime": regime,
         "confidence": confidence,
         "net": int(net),
-        "risk_points": int(risk),
         "trend_score": int(trend_score),
-        "macro_flags": int(macro_flags),
+        "scores": scores,
         "leverage_regime": leverage_regime,
         "metrics": metrics,
         "why": why[:10],
         "chips": chips,
     }
-# ---------------------------
-# Routes
-# ---------------------------
-
-@app.get("/status")
-def status():
-    return compute_stoplight()
-
-
-@app.get("/", response_class=HTMLResponse)
-def homepage():
-    # Don’t ever 500 the UI; show error in-page instead.
-    try:
-        data = compute_stoplight()
-    except Exception as e:
-        data = {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "light": "YELLOW",
-            "confidence": "LOW",
-            "risk_points": "NA",
-            "metrics": [],
-            "chips": [],
-            "why": [f"compute_stoplight error: {type(e).__name__}: {e}"],
-        }
-
-    light = data.get("light", "YELLOW")
-    color = {"GREEN": "#2ee59d", "YELLOW": "#ffd166", "RED": "#ff5c7a"}.get(light, "#ffd166")
-
-    cards_html = "".join([
-        f"""
-        <div class="card">
-          <div class="k">{m.get("name","")}</div>
-          <div class="row">
-            <div class="val">{m.get("value","")}</div>
-            <div class="delta">{m.get("delta","")}</div>
-          </div>
-        </div>
-        """ for m in data.get("metrics", [])
-    ])
-
-    why_html = "".join([f"<li>{x}</li>" for x in data.get("why", [])])
-    menu_html = "".join([f'<span class="chip">{x}</span>' for x in data.get("chips", [])])
-
-    return f"""
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Market Stoplight</title>
-  <style>
-    :root {{
-      --bg:#070a12;
-      --panel:rgba(255,255,255,.06);
-      --border:rgba(255,255,255,.12);
-      --muted:rgba(255,255,255,.72);
-      --muted2:rgba(255,255,255,.55);
-      --accent:{color};
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
-    }}
-    body {{ margin:0; font-family: -apple-system, system-ui, Segoe UI, Roboto, Arial; background:var(--bg); color:#fff; }}
-    .wrap {{ max-width: 860px; margin:0 auto; padding:22px 16px 40px; }}
-    .top {{ display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; align-items:baseline; }}
-    .title {{ font-size: 22px; font-weight: 800; }}
-    .stamp {{ font-family:var(--mono); color:var(--muted2); font-size:12px; }}
-    .grid {{ display:grid; grid-template-columns: 280px 1fr; gap:14px; margin-top:14px; }}
-    @media(max-width:760px){{ .grid{{grid-template-columns:1fr;}} }}
-    .panel {{ background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:16px; }}
-    .light {{ width:210px; height:210px; border-radius:50%; margin:6px auto 10px; background:var(--accent); box-shadow:0 0 0 8px rgba(255,255,255,.06); }}
-    .label {{ text-align:center; font-size:28px; font-weight:900; letter-spacing:1px; }}
-    .sub {{ text-align:center; margin-top:6px; color:var(--muted); }}
-    .k {{ color:var(--muted2); font-size:12px; letter-spacing:.10em; text-transform:uppercase; margin-bottom:8px; }}
-    .cards {{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; }}
-    @media(max-width:760px){{ .cards{{grid-template-columns:1fr;}} }}
-    .card {{ border:1px solid var(--border); border-radius:14px; padding:12px; background:rgba(0,0,0,.14); }}
-    .row {{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }}
-    .val {{ font-size:18px; font-weight:800; }}
-    .delta {{ font-family:var(--mono); font-size:12px; color:var(--muted); text-align:right; }}
-    ul {{ margin:6px 0 0 18px; color:var(--muted); line-height:1.45; }}
-    .chip {{ display:inline-block; margin:6px 6px 0 0; padding:7px 10px; border-radius:999px; border:1px solid var(--border); background:rgba(0,0,0,.12); font-size:13px; }}
-    .headline {{ font-size:16px; font-weight:800; margin-bottom:8px; }}
-    .note {{ margin-top:12px; color:var(--muted2); font-size:12px; }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="top">
-      <div class="title">Market Stoplight</div>
-      <div class="stamp">Updated: {data.get("timestamp","")}</div>
-    </div>
-
-    <div class="grid">
-      <div class="panel">
-        <div class="light"></div>
-        <div class="label">{data.get("regime","NEUTRAL")}</div>
-        <div class="sub">Stoplight: {data.get("light","YELLOW")} · Confidence: {data.get("confidence","NA")} · Net: {data.get("net","NA")}</div>
-
-        <div class="note">
-          <div class="k">Interpretation (Why)</div>
-          <ul>
-            {why_html}
-          </ul>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="headline">Dashboard</div>
-        <div class="cards">
-          {cards_html}
-        </div>
-
-        <div style="margin-top:14px;">
-          <div class="k">Levers (menu, not advice)</div>
-          {menu_html}
-        </div>
-
-        <div class="note">
-          <div class="k">How to use it</div>
-          <ul>
-            <li><b>GREEN</b>: leverage allowed; prefer “leaders” (NVDL/AMDL) over broad beta if you’ll be offline.</li>
-            <li><b>YELLOW</b>: smaller size, tighter holds; wait for confirmation.</li>
-            <li><b>RED</b>: hedge/defend (PSQ/SQQQ/HIBS), reduce leverage.</li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
-"""
