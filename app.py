@@ -56,11 +56,23 @@ def _pct_from_yf(symbol: str) -> float:
 def tape_signal():
     """
     Simple 'tape' score based on SPY/QQQ/DIA percent change.
-    Returns dict with avg move and bias label.
+    Uses yfinance directly.
     """
-    spy = _pct_from_yf("SPY")
-    qqq = _pct_from_yf("QQQ")
-    dia = _pct_from_yf("DIA")
+    import yfinance as yf
+
+    def pct(ticker):
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period="2d")
+            if len(hist) >= 2:
+                return ((hist["Close"][-1] / hist["Close"][-2]) - 1) * 100
+        except Exception:
+            pass
+        return np.nan
+
+    spy = pct("SPY")
+    qqq = pct("QQQ")
+    dia = pct("DIA")
 
     vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
     avg = float(np.mean(vals)) if vals else np.nan
