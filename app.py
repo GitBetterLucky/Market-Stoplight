@@ -553,7 +553,25 @@ def compute_stoplight():
             0,
             f"Tape risk-off (SPY/QQQ/DIA avg {fmt_num(tape_avg,2)}%) → avoid long leverage today."
         )
-        
+         # ---------------------------
+    
+    # Cross-asset snapshot (Yahoo) — used for scoring + interpretation
+    # ---------------------------
+    xa = cross_asset_snapshot()
+    pct = xa.get("pct", {})
+    ratios = xa.get("ratios", {})
+
+    # Convenience
+    rsp_pct = pct.get("RSP", np.nan)
+    spy_pct = pct.get("SPY", np.nan)
+    iwm_pct = pct.get("IWM", np.nan)
+    hyg_pct = pct.get("HYG", np.nan)
+    lqd_pct = pct.get("LQD", np.nan)
+    uup_pct = pct.get("UUP", np.nan)
+    gld_pct = pct.get("GLD", np.nan)
+    tlt_pct = pct.get("TLT", np.nan)
+    uso_pct = pct.get("USO", np.nan)
+    jpy_pct = pct.get("JPY=X", np.nan)  # % change in USDJPY (best-effort)   
 
     # ---------------------------
         # 5-tier regime (headline)
@@ -592,6 +610,38 @@ def compute_stoplight():
     else:
         confidence = "LOW"
 
+    # ---------------------------
+    # Structural add-ons (breadth + credit proxy)
+    # ---------------------------
+    structural_bonus = 0
+
+    # Breadth proxy: equal-weight underperforming is a warning (narrow leadership)
+    if not np.isnan(rsp_pct) and not np.isnan(spy_pct):
+        if (rsp_pct - spy_pct) <= -0.35:
+            structural_bonus -= 1
+            why_points.append("Breadth warning: equal-weight (RSP) lagging SPY → leadership narrow; rallies less stable.")
+        elif (rsp_pct - spy_pct) >= 0.20:
+            structural_bonus += 1
+            why_points.append("Breadth healthy: equal-weight (RSP) keeping up with SPY → participation improving.")
+
+    # Credit proxy: HYG lagging LQD = risk-off (credit cautious)
+    if not np.isnan(hyg_pct) and not np.isnan(lqd_pct):
+        if (hyg_pct - lqd_pct) <= -0.25:
+            structural_bonus -= 1
+            why_points.append("Credit caution: junk bonds (HYG) lag IG (LQD) → risk appetite slipping.")
+        elif (hyg_pct - lqd_pct) >= 0.15:
+            structural_bonus += 1
+            why_points.append("Credit supportive: HYG outperforming LQD → risk appetite healthier.")
+
+    # Small caps proxy: IWM lagging SPY often = tightening / risk-off under the surface
+    if not np.isnan(iwm_pct) and not np.isnan(spy_pct):
+        if (iwm_pct - spy_pct) <= -0.40:
+            structural_bonus -= 1
+            why_points.append("Risk breadth caution: small caps (IWM) lagging SPY → conditions less friendly for leverage.")
+
+    # Update net with structural add-ons (still not “tactical tape”)
+    net = net + structural_bonus
+    
     # Leverage regime (useful overlay)
     leverage_regime = "NEUTRAL"
     if (not np.isnan(vix_pct) and vix_pct <= 50) and (not atr_expansion) and momentum_accel and trend_score >= 2 and macro_flags == 0:
