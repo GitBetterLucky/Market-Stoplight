@@ -253,16 +253,77 @@ def classify_ratio(r_now, r_ref, band=0.003):
         return "DOWN"
     return "FLAT"
 
+def yf_quotes(symbols):
+    """
+    Batch fetch last + prev close using yfinance download.
+    Returns dict: {SYM: {"regularMarketPrice": last_close, "regularMarketPreviousClose": prev_close}}
+    """
+    if isinstance(symbols, str):
+        symbols = [symbols]
+    if not symbols:
+        return {}
+
+    out = {s.upper(): None for s in symbols}
+
+    try:
+        data = yf.download(
+            tickers=symbols,
+            period="2d",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+
+        def last_two(sym: str):
+            if isinstance(data.columns, pd.MultiIndex):
+                if (sym, "Close") not in data.columns:
+                    return (np.nan, np.nan)
+                closes = data[(sym, "Close")].dropna()
+            else:
+                closes = data["Close"].dropna()
+            if len(closes) == 0:
+                return (np.nan, np.nan)
+            if len(closes) == 1:
+                return (float(closes.iloc[-1]), np.nan)
+            return (float(closes.iloc[-1]), float(closes.iloc[-2]))
+
+        for sym in symbols:
+            s = sym.upper()
+            last_close, prev_close = last_two(s)
+            if not np.isnan(last_close):
+                out[s] = {
+                    "regularMarketPrice": last_close,
+                    "regularMarketPreviousClose": prev_close if not np.isnan(prev_close) else None,
+                }
+        return out
+
+    except Exception:
+        return out
+
+def pick_pct_from_price(quote):
+    try:
+        if not quote:
+            return np.nan
+        last = quote.get("regularMarketPrice", None)
+        prev = quote.get("regularMarketPreviousClose", None)
+        if last is None or prev in (None, 0):
+            return np.nan
+        return (float(last) / float(prev) - 1.0) * 100.0
+    except Exception:
+        return np.nan
+
 def cross_asset_snapshot():
     """
     Pulls best-effort cross-asset proxies from Yahoo.
     Returns dict with pct changes and ratio states.
     """
     syms = ["SPY","QQQ","DIA","RSP","IWM","HYG","LQD","UUP","GLD","USO","TLT","JPY=X"]
-    q = get_yahoo_quotes(syms)
+    q = yf_quotes(syms)
 
     # live pct (premarket if present, else regular)
-    pct = {s: pick_pct(q.get(s)) for s in syms}
+    pct = {s: pick_pct_from_price(q.get(s)) for s in syms}
     last = {s: pick_last(q.get(s)) for s in syms}
 
     # ratios (instant snapshot)
