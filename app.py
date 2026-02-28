@@ -1117,14 +1117,365 @@ def compute_stoplight():
         "why": why[:10],
         "chips": chips,
     }
+
+# ---------------------------
+# B: Event -> Analogs -> Sector/Basket Outperformance
+# ---------------------------
+
+from functools import lru_cache
+from typing import List, Dict, Any, Optional
+
+# 1) Curated analog events (you can expand this over time)
+# Keep these as "YYYY-MM-DD" and tag them. Start small, grow later.
+ANALOG_EVENTS = [
+    # Middle East / Iran / oil supply risk
+    {"id": "soleimani_2020", "name": "Soleimani strike", "date": "2020-01-03",
+     "tags": ["middle_east", "iran", "us", "kinetic", "oil_risk"]},
+
+    {"id": "abqaiq_2019", "name": "Saudi Abqaiq attack", "date": "2019-09-16",
+     "tags": ["middle_east", "oil_risk", "supply_shock"]},
+
+    {"id": "gulf_war_1991", "name": "Gulf War air campaign begins", "date": "1991-01-17",
+     "tags": ["middle_east", "kinetic", "oil_risk"]},
+
+    {"id": "iraq_invasion_2003", "name": "Iraq invasion begins", "date": "2003-03-20",
+     "tags": ["middle_east", "kinetic", "oil_risk"]},
+
+    # Shipping / chokepoints / Red Sea style risk (add more as you like)
+    {"id": "red_sea_2024", "name": "Red Sea shipping escalation window", "date": "2024-01-12",
+     "tags": ["shipping", "chokepoint", "middle_east", "risk_off"]},
+
+    # Broader geopolitics / shocks (optional)
+    {"id": "ukraine_2022", "name": "Russia invades Ukraine", "date": "2022-02-24",
+     "tags": ["war", "supply_shock", "risk_off", "energy", "commodities"]},
+]
+
+# 2) Simple taxonomy rules (deterministic v1)
+EVENT_RULES = [
+    {"match_any": ["iran", "israel", "middle east", "tehran", "gaza", "hezbollah", "houthi"],
+     "tags": ["middle_east"]},
+    {"match_any": ["iran"], "tags": ["iran"]},
+    {"match_any": ["israel"], "tags": ["israel"]},
+    {"match_any": ["us", "u.s.", "america", "pentagon"], "tags": ["us"]},
+    {"match_any": ["strike", "bomb", "missile", "airstrike", "kinetic"], "tags": ["kinetic"]},
+    {"match_any": ["oil", "crude", "brent", "wti", "hormuz", "refinery", "supply"],
+     "tags": ["oil_risk", "supply_shock"]},
+    {"match_any": ["shipping", "red sea", "suez", "hormuz", "chokepoint", "freight"],
+     "tags": ["shipping", "chokepoint"]},
+    {"match_any": ["terror", "attack", "hostage"], "tags": ["risk_off"]},
+]
+
+def classify_event_query(q: str) -> Dict[str, Any]:
+    q0 = (q or "").strip().lower()
+    tags = set()
+
+    for rule in EVENT_RULES:
+        if any(k in q0 for k in rule["match_any"]):
+            tags.update(rule["tags"])
+
+    # If it smells like Iran/Israel strike but missing explicit words:
+    if ("iran" in q0 or "israel" in q0) and ("strike" in q0 or "attack" in q0):
+        tags.update(["middle_east", "kinetic"])
+
+    if not tags:
+        tags.add("generic_shock")
+
+    return {"query": q, "tags": sorted(tags)}
+
+def retrieve_analogs(tags: List[str], k: int = 5) -> List[Dict[str, Any]]:
+    tagset = set(tags or [])
+    scored = []
+    for ev in ANALOG_EVENTS:
+        ev_tags = set(ev.get("tags", []))
+        overlap = len(tagset.intersection(ev_tags))
+        # small boost if middle_east tag present in both
+        boost = 0.5 if ("middle_east" in tagset and "middle_east" in ev_tags) else 0.0
+        score = overlap + boost
+        if score > 0:
+            scored.append((score, ev))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [ev for _, ev in scored[:k]]
+
+DEFAULT_EVENT_BASKETS = {
+    # broad comparators
+    "benchmark": ["SPY"],
+
+    # defense / aerospace
+    "defense": ["ITA", "XAR"],
+
+    # energy / oil beta
+    "energy": ["XLE", "USO"],
+
+    # defensives
+    "defensives": ["XLP", "XLU"],
+
+    # gold / bonds / dollar (hedge proxies)
+    "hedges": ["GLD", "TLT", "UUP"],
+
+    # semis as risk-on check (optional)
+    "risk_on": ["QQQ", "SOXX"],
+
+    # shipping proxies (pick liquid names you’re comfortable with)
+    # These aren’t perfect. Replace with your preferred set.
+    "shipping": ["DAC", "ZIM", "SBLK"],
+}
+
+DEFAULT_HORIZONS = [1, 5, 21, 63]  # trading days ~ 1D, 1W, 1M, 1Q
+
+def _next_trading_days(index: pd.DatetimeIndex, start: pd.Timestamp, n: int) -> Optional[pd.Timestamp]:
+    # find first index >= start, then advance n days
+    idx = index[index >= start]
+    if len(idx) == 0:
+        return None
+    i0 = index.get_loc(idx[0])
+    i1 = i0 + n
+    if i1 >= len(index):
+        return None
+    return index[i1]
+
+@lru_cache(maxsize=256)
+def _yf_close_series(symbol: str, start: str, end: str) -> pd.Series:
+    df = yf.download(symbol, start=start, end=end, interval="1d", auto_adjust=False, progress=False, threads=False)
+    if df is None or df.empty or "Close" not in df:
+        return pd.Series(dtype=float)
+    s = df["Close"].dropna()
+    s.index = pd.to_datetime(s.index)
+    return s
+
+def _return_over_horizon(px: pd.Series, event_date: str, horizon_days: int) -> float:
+    if px is None or px.empty:
+        return np.nan
+    d0 = pd.to_datetime(event_date)
+    idx = px.index
+
+    # anchor at first trading day on/after event date
+    start_t = _next_trading_days(idx, d0, 0)
+    end_t = _next_trading_days(idx, d0, horizon_days)
+
+    if start_t is None or end_t is None:
+        return np.nan
+    p0 = float(px.loc[start_t])
+    p1 = float(px.loc[end_t])
+    if p0 == 0:
+        return np.nan
+    return (p1 / p0 - 1.0) * 100.0
+
+def backtest_analogs(
+    analogs: List[Dict[str, Any]],
+    baskets: Dict[str, List[str]] = None,
+    horizons: List[int] = None,
+) -> Dict[str, Any]:
+    baskets = baskets or DEFAULT_UNIVERSE_BASKETS
+    horizons = horizons or DEFAULT_HORIZONS
+
+    # Gather all tickers (include SPY explicitly for alpha)
+    tickers = set(["SPY"])
+    for _, syms in baskets.items():
+        tickers.update([s.upper() for s in syms])
+
+    # Determine download window: earliest event - buffer, latest event + buffer
+    dates = [pd.to_datetime(a["date"]) for a in analogs if a.get("date")]
+    if not dates:
+        return {"error": "No analog dates to backtest."}
+
+    start = (min(dates) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+    end = (max(dates) + pd.Timedelta(days=180)).strftime("%Y-%m-%d")
+
+    prices = {t: _yf_close_series(t, start, end) for t in tickers}
+
+    # Compute event returns + alpha vs SPY
+    rows = []
+    for a in analogs:
+        d = a["date"]
+        spy_px = prices.get("SPY")
+        for h in horizons:
+            spy_ret = _return_over_horizon(spy_px, d, h)
+            for t in tickers:
+                if t == "SPY":
+                    continue
+                r = _return_over_horizon(prices.get(t), d, h)
+                alpha = r - spy_ret if (not np.isnan(r) and not np.isnan(spy_ret)) else np.nan
+                rows.append({
+                    "analog_id": a["id"],
+                    "analog_name": a["name"],
+                    "date": d,
+                    "horizon": h,
+                    "ticker": t,
+                    "ret": r,
+                    "spy_ret": spy_ret,
+                    "alpha": alpha,
+                })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return {"error": "Backtest produced no rows (missing price history?)"}
+
+    # Summarize by ticker+horizon: median alpha, hit rate, sample size
+    summaries = []
+    for (t, h), g in df.groupby(["ticker", "horizon"]):
+        alphas = g["alpha"].dropna()
+        if len(alphas) == 0:
+            continue
+        summaries.append({
+            "ticker": t,
+            "horizon": int(h),
+            "n": int(len(alphas)),
+            "median_alpha": float(alphas.median()),
+            "hit_rate": float((alphas > 0).mean() * 100.0),
+            "p25_alpha": float(alphas.quantile(0.25)),
+            "p75_alpha": float(alphas.quantile(0.75)),
+        })
+    sum_df = pd.DataFrame(summaries)
+
+    # Basket rollups: average of member ticker median alphas (simple)
+    basket_rollups = []
+    for basket_name, members in baskets.items():
+        members = [m.upper() for m in members if m.upper() != "SPY"]
+        if not members:
+            continue
+        for h in horizons:
+            sub = sum_df[(sum_df["ticker"].isin(members)) & (sum_df["horizon"] == h)]
+            if sub.empty:
+                continue
+            basket_rollups.append({
+                "basket": basket_name,
+                "horizon": int(h),
+                "avg_median_alpha": float(sub["median_alpha"].mean()),
+                "avg_hit_rate": float(sub["hit_rate"].mean()),
+                "members": members,
+            })
+    basket_df = pd.DataFrame(basket_rollups)
+
+    # Top baskets per horizon
+    top_by_h = {}
+    for h in horizons:
+        sub = basket_df[basket_df["horizon"] == h].copy()
+        if sub.empty:
+            top_by_h[str(h)] = []
+            continue
+        sub = sub.sort_values("avg_median_alpha", ascending=False).head(5)
+        top_by_h[str(h)] = sub.to_dict(orient="records")
+
+    return {
+        "analogs": analogs,
+        "horizons": horizons,
+        "basket_rankings": top_by_h,
+        "ticker_summary": sum_df.sort_values(["horizon", "median_alpha"], ascending=[True, False]).to_dict(orient="records"),
+        "raw_rows": df.to_dict(orient="records"),  # optional; you can remove later
+    }
+
+# Full sector map (SPDR)
+SECTOR_ETFS = {
+    "Communication Services": ["XLC"],
+    "Consumer Discretionary": ["XLY"],
+    "Consumer Staples": ["XLP"],
+    "Energy": ["XLE"],
+    "Financials": ["XLF"],
+    "Health Care": ["XLV"],
+    "Industrials": ["XLI"],
+    "Materials": ["XLB"],
+    "Real Estate": ["XLRE"],
+    "Technology": ["XLK"],
+    "Utilities": ["XLU"],
+}
+
+# Style / breadth / size (optional but useful)
+STYLE_ETFS = {
+    "Small Caps": ["IWM"],
+    "Mid Caps": ["MDY"],
+    "Equal Weight S&P": ["RSP"],
+    "Growth": ["IVW"],
+    "Value": ["IVE"],
+}
+
+# Macro sleeves (proxies; not “sectors” but relevant in geopolitical shocks)
+MACRO_PROXIES = {
+    "Gold": ["GLD"],
+    "Long Treasuries": ["TLT"],
+    "Dollar": ["UUP"],
+    "Oil": ["USO"],
+    "Broad Commodities": ["DBC"],
+    "Defense/Aerospace": ["ITA", "XAR"],
+}
+
+DEFAULT_UNIVERSE_BASKETS = {"benchmark": ["SPY"]}
+
+# one basket per sector
+for name, tickers in SECTOR_ETFS.items():
+    DEFAULT_UNIVERSE_BASKETS[f"sector:{name}"] = tickers
+
+# one basket per style
+for name, tickers in STYLE_ETFS.items():
+    DEFAULT_UNIVERSE_BASKETS[f"style:{name}"] = tickers
+
+# one basket per macro sleeve
+for name, tickers in MACRO_PROXIES.items():
+    DEFAULT_UNIVERSE_BASKETS[f"macro:{name}"] = tickers
+}
+
 # ---------------------------
 # Routes
 # ---------------------------
+
+from fastapi import Query
+
+@app.get("/event")
+def event_endpoint(q: str = Query(..., description="Event description text")):
+    """
+    Example:
+    /event?q=Iran Israel joint strike
+    """
+
+    # 1) Classify
+    classification = classify_event_query(q)
+
+    # 2) Retrieve analogs
+    analogs = retrieve_analogs(classification["tags"], k=5)
+
+    if not analogs:
+        return {
+            "query": q,
+            "tags": classification["tags"],
+            "error": "No historical analogs matched."
+        }
+
+    # 3) Run backtest
+    results = backtest_analogs(analogs)
+
+    return {
+        "query": q,
+        "tags": classification["tags"],
+        "analogs_used": analogs,
+        "results": results
+    }
 
 @app.get("/status")
 def status():
     return compute_stoplight()
 
+@app.get("/playbook")
+def playbook(q: str = "iran israel us joint strike", k: int = 5):
+    classified = classify_event_query(q)
+    analogs = retrieve_analogs(classified["tags"], k=k)
+
+    if not analogs:
+        return {
+            "query": q,
+            "tags": classified["tags"],
+            "error": "No historical analogs matched.",
+            "asof": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    bt = backtest_analogs(analogs, baskets=DEFAULT_EVENT_BASKETS)
+
+    return {
+        "query": q,
+        "tags": classified["tags"],
+        "analogs": analogs,
+        "results": bt,
+        "asof": datetime.now().isoformat(timespec="seconds"),
+    }
 
 @app.get("/", response_class=HTMLResponse)
 def homepage():
