@@ -1412,7 +1412,6 @@ for name, tickers in STYLE_ETFS.items():
 # one basket per macro sleeve
 for name, tickers in MACRO_PROXIES.items():
     DEFAULT_UNIVERSE_BASKETS[f"macro:{name}"] = tickers
-}
 
 # ---------------------------
 # Routes
