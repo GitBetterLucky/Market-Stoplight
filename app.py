@@ -598,36 +598,76 @@ def build_why_2_0(trend_score, spx_above_50, spx_above_200, ndx_above_50, ndx_ab
     return why[:10]
 
 def build_interpretation(light, confidence, leverage_regime, chips, why):
-    if light == "GREEN":
-        headline = "Trend beats stress (risk-on regime)."
+    """
+    5-tier interpretation:
+    RED, ORANGE, YELLOW, GREEN, STAR
+    """
+
+    if light == "STAR":
+        headline = "Clean risk-on (top-tier conditions)."
         what = [
-            "Best environment for multi-day leverage is: uptrend + contained stress + manageable volatility.",
-            "Prefer buying pullbacks over chasing green candles."
+            "Best backdrop for adding risk: trend + participation + low stress aligned.",
+            "Leverage is allowed — still prefer pullbacks and clear leaders vs broad beta if you’ll be offline."
         ]
         watchouts = [
-            "If VIX jumps + HY spreads widen together, regime can flip quickly.",
-            "Leverage decay still hurts in sideways chop."
+            "Complacency traps: a sudden VIX + credit stress pop can flip this fast.",
+            "Don’t confuse a great regime with a guarantee — size like a pro, not like a tourist."
         ]
-    elif light == "YELLOW":
-        headline = "Mixed regime (selective leverage)."
+
+    elif light == "GREEN":
+        headline = "Risk-on regime (trend beats stress)."
         what = [
-            "Signals are not clean. Smaller size and confirmation matter more than being early.",
-            "Consider partial hedges or shorter holds until stress gauges improve."
+            "Leverage is generally OK when trends hold and stress gauges stay contained.",
+            "Prefer buying pullbacks over chasing; add on confirmation rather than emotion."
+        ]
+        watchouts = [
+            "If VIX rises while HY spreads widen, downgrade fast (leverage gets punished).",
+            "Sideways chop still bleeds leveraged ETFs even if the headline looks ‘fine’."
+        ]
+
+    elif light == "YELLOW":
+        headline = "Mixed regime (selective risk)."
+        what = [
+            "Signals aren’t clean — reduce size, shorten holds, and demand confirmation.",
+            "Focus on highest-quality setups; avoid broad leverage when tape is choppy."
         ]
         watchouts = [
             "Chop weeks are where leveraged ETFs bleed quietly.",
-            "If stress worsens, assume downside tails are larger."
+            "If stress worsens, assume downside tails are larger than they feel."
         ]
-    else:
-        headline = "Stress beats trend (risk-off regime)."
+
+    elif light == "ORANGE":
+        headline = "Elevated risk (defense favored)."
         what = [
-            "Defense first: cash/hedges beat forcing upside.",
-            "Wait for stress to normalize + trend to recover before sizing up risk-on."
+            "Risk is skewed against leverage — prioritize capital preservation and flexibility.",
+            "If you trade, make it smaller, faster, and more tactical (or hedge)."
         ]
         watchouts = [
-            "Bear market rallies are violent—don’t oversize inverses either.",
-            "Avoid ‘revenge leverage’ after big down days."
+            "Reflex rallies are common — don’t let them bait oversized risk-on leverage.",
+            "If you’re wrong, you’ll know quickly; have exits defined up front."
         ]
+
+    else:  # RED (and any unknown values)
+        headline = "High-risk regime (stress beats trend)."
+        what = [
+            "Defense first: cash/hedges usually beat forcing upside here.",
+            "Wait for stress to normalize and trend to repair before sizing up risk-on."
+        ]
+        watchouts = [
+            "Bear market rallies are violent — don’t oversize inverses either.",
+            "Avoid revenge leverage after big down days."
+        ]
+
+    return {
+        "headline": headline,
+        "confidence": confidence,
+        "leverage_regime": leverage_regime,
+        "what_it_means": what,
+        "watchouts": watchouts,
+        "lever_menu": chips,
+        "why": why,
+        "disclaimer": "Educational only; not investment advice. Leveraged/inverse ETFs can lose rapidly, especially in volatile regimes."
+    }
 
     return {
         "headline": headline,
