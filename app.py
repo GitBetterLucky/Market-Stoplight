@@ -222,63 +222,77 @@ def fmt_delta(x, decimals=2, suffix=""):
 # ---------------------------
 
 def explain_indicator_blocks(vix, hy, y10, vix_pct, atr_expansion, momentum_accel, agree):
+    """
+    Clean, instructional 'Why' lines.
+    Order is stable:
+    1) Stress snapshot
+    2) What that means
+    3) Trend/vol/momentum overlays
+    4) Crypto context (explicitly not scored)
+    """
     why = []
 
-    # VIX
-    if not np.isnan(vix["last"]):
-        if vix["last"] >= 25:
-            why.append(f"VIX elevated ({fmt_num(vix['last'], 2)}) → markets pricing more fear/volatility.")
-        elif vix["last"] >= 20:
-            why.append(f"VIX moderately high ({fmt_num(vix['last'], 2)}) → more chop; leverage less forgiving.")
+    # --- 1) Stress snapshot (numbers first, compact) ---
+    vix_last = vix.get("last", np.nan)
+    hy_last  = hy.get("last", np.nan)
+    y10_last = y10.get("last", np.nan)
+
+    stress_bits = []
+    if not np.isnan(vix_last):
+        stress_bits.append(f"VIX {fmt_num(vix_last,2)} (pctl {fmt_num(vix_pct,0)})")
+    if not np.isnan(hy_last):
+        stress_bits.append(f"HY {fmt_num(hy_last,2)}")
+    if not np.isnan(y10_last):
+        stress_bits.append(f"10Y {fmt_num(y10_last,2)}")
+    stress_bits.append("ATR expanding" if atr_expansion else "ATR stable")
+
+    why.append("Stress snapshot: " + " · ".join(stress_bits) + ".")
+
+    # --- 2) What it means (teach the user) ---
+    # VIX interpretation (absolute + relative)
+    if not np.isnan(vix_last):
+        if vix_last >= 25:
+            why.append("Meaning: volatility is elevated — expect whipsaw; leverage is less forgiving.")
+        elif vix_last >= 20:
+            why.append("Meaning: volatility is mildly elevated — expect chop; smaller size helps.")
         else:
-            why.append(f"VIX calm ({fmt_num(vix['last'], 2)}) → vol not screaming danger.")
+            why.append("Meaning: volatility is calm — easier environment for multi-day holds *if* trend supports it.")
 
     if not np.isnan(vix_pct):
         if vix_pct >= 80:
-            why.append(f"VIX high vs ~90D (pctl {vix_pct:.0f}%) → higher whipsaw/decay risk.")
+            why.append("Meaning: VIX is high vs recent history — decay/whipsaw risk rises even if trend looks OK.")
         elif vix_pct <= 30:
-            why.append(f"VIX low vs ~90D (pctl {vix_pct:.0f}%) → friendlier for multi-day leverage.")
+            why.append("Meaning: VIX is low vs recent history — conditions are friendlier for leverage (trend still matters).")
 
-    # HY spreads
-    if not np.isnan(hy["last"]):
-        if hy["last"] >= 5.0:
-            why.append(f"HY spreads wide ({fmt_num(hy['last'], 2)}) → credit stress rising; equities can follow lower.")
-        elif hy["last"] >= 4.0:
-            why.append(f"HY spreads drifting up ({fmt_num(hy['last'], 2)}) → mild risk-off from credit.")
+    # HY / rates: keep it short and practical
+    if not np.isnan(hy_last):
+        if hy_last >= 5.0:
+            why.append("Meaning: credit stress is rising — equity drawdowns can accelerate.")
+        elif hy_last >= 4.0:
+            why.append("Meaning: credit is mildly risk-off — keep expectations tight.")
         else:
-            why.append(f"HY spreads contained ({fmt_num(hy['last'], 2)}) → credit not flashing red.")
+            why.append("Meaning: credit looks contained — not a major headwind today.")
 
-    if not np.isnan(hy["d5"]) and hy["d5"] >= 0.25:
-        why.append(f"HY widening over ~5D ({fmt_delta(hy['d5'], 2)}) → funding stress rising.")
-
-    # 10Y
-    if not np.isnan(y10["last"]):
-        if y10["last"] >= 4.75:
-            why.append(f"10Y high ({fmt_num(y10['last'], 2)}) → tighter conditions can pressure growth/tech.")
-        elif y10["last"] >= 4.50:
-            why.append(f"10Y elevated ({fmt_num(y10['last'], 2)}) → headwind if it keeps rising.")
+    if not np.isnan(y10_last):
+        if y10_last >= 4.75:
+            why.append("Meaning: rates are high — can pressure growth/tech multiples.")
+        elif y10_last >= 4.50:
+            why.append("Meaning: rates are elevated — watch for renewed tightening impulse.")
         else:
-            why.append(f"10Y not extreme ({fmt_num(y10['last'], 2)}) → rates not primary stressor.")
+            why.append("Meaning: rates aren’t the main stress signal today.")
 
-    # Vol expansion + momentum
-    if atr_expansion:
-        why.append("SPX volatility expanding (ATR proxy up) → more whipsaw; reduce leverage or expectations.")
-    else:
-        why.append("SPX volatility stable/compressed → better for multi-day leverage (if trend supports it).")
+    # --- 3) Tactical overlays (momentum is direction, ATR is path) ---
+    why.append("Path: volatility expanding → expect bigger intraday swings." if atr_expansion
+               else "Path: volatility stable → trend-following behaves better.")
 
-    if momentum_accel:
-        why.append("NDX momentum accelerating (5D > 21D) → supports risk-on continuation.")
-    else:
-        why.append("NDX momentum not accelerating → expect chop/grind unless a catalyst hits.")
+    why.append("Direction: NDX momentum improving (5D > 21D)." if momentum_accel
+               else "Direction: NDX momentum not improving → higher chop risk.")
 
-    # Crypto alignment
-    if agree:
-        why.append("BTC/ETH aligned → crypto signal quality higher today.")
-    else:
-        why.append("BTC/ETH diverge → crypto signal mixed today.")
+    # --- 4) Crypto context (explicitly not scored) ---
+    why.append("Crypto context: BTC/ETH aligned (not scored)." if agree
+               else "Crypto context: BTC/ETH mixed (not scored).")
 
     return why[:10]
-
 
 def build_interpretation(light, confidence, leverage_regime, chips, why):
     if light == "GREEN":
