@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+import yfinance as yf
 import requests
 import pandas as pd
 import numpy as np
@@ -18,63 +19,60 @@ def _safe_get_json(url, params=None, timeout=12):
     r = requests.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
+    
 # ---------------------------
-# LIVE TAPE (Yahoo quotes) helpers — no key
+# Real-time quote helper (yfinance; best-effort, no key)
 # ---------------------------
 
-def _safe_get_json_allow_text(url, params=None, timeout=10):
+def _pct_from_yf(symbol: str) -> float:
     """
-    Some endpoints (Yahoo) occasionally return non-JSON (HTML, empty, etc).
-    Return dict on success; {} on failure.
+    Returns % change for today.
+    Prefers pre/post if available, else regular market.
     """
     try:
-        r = requests.get(url, params=params, timeout=timeout, headers={
-            # Header reduces simple bot blocks; still not guaranteed.
-            "User-Agent": "Mozilla/5.0"
-        })
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return {}
+        t = yf.Ticker(symbol)
 
-def get_yahoo_quotes(symbols):
-    """
-    Fetch Yahoo quote data for a list of tickers.
-    Returns dict: { "SPY": <quote_dict or None>, ... }
-    """
-    if not symbols:
-        return {}
+        # fast_info is lightweight; sometimes missing fields
+        fi = getattr(t, "fast_info", None) or {}
+        last = fi.get("last_price", None)
+        prev = fi.get("previous_close", None)
 
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    params = {"symbols": ",".join(symbols)}
+        if last is not None and prev not in (None, 0):
+            return (float(last) / float(prev) - 1.0) * 100.0
 
-    j = _safe_get_json_allow_text(url, params=params, timeout=10)
-    results = (((j or {}).get("quoteResponse") or {}).get("result")) or []
-
-    out = {}
-    for q in results:
-        sym = q.get("symbol")
-        if sym:
-            out[sym.upper()] = q
-    # ensure keys exist even if missing
-    for s in symbols:
-        out.setdefault(s.upper(), None)
-    return out
-
-def pick_pct(quote):
-    """
-    From a Yahoo quote dict, return regularMarketChangePercent as float.
-    If missing, return np.nan.
-    """
-    try:
-        if not quote:
+        # fallback: 2 daily closes
+        hist = t.history(period="5d", interval="1d")
+        if hist is None or hist.empty or len(hist) < 2:
             return np.nan
-        v = quote.get("regularMarketChangePercent", None)
-        if v is None:
+        prev_close = float(hist["Close"].iloc[-2])
+        last_close = float(hist["Close"].iloc[-1])
+        if prev_close == 0:
             return np.nan
-        return float(v)
+        return (last_close / prev_close - 1.0) * 100.0
     except Exception:
         return np.nan
+
+
+def tape_signal():
+    """
+    Simple 'tape' score based on SPY/QQQ/DIA percent change.
+    Returns dict with avg move and bias label.
+    """
+    spy = _pct_from_yf("SPY")
+    qqq = _pct_from_yf("QQQ")
+    dia = _pct_from_yf("DIA")
+
+    vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
+    avg = float(np.mean(vals)) if vals else np.nan
+
+    if not np.isnan(avg) and avg <= -0.80:
+        bias = "BEAR"
+    elif not np.isnan(avg) and avg >= 0.80:
+        bias = "BULL"
+    else:
+        bias = "NEUTRAL"
+
+    return {"spy": spy, "qqq": qqq, "dia": dia, "avg": avg, "bias": bias}
 
 # ---------------------------
 # FRED helpers
@@ -324,73 +322,6 @@ def build_interpretation(light, confidence, leverage_regime, chips, why):
         "why": why,
         "disclaimer": "Educational only; not investment advice. Leveraged/inverse ETFs can lose rapidly, especially in volatile regimes."
     }
-
-# ---------------------------
-# Real-time quote helper (Yahoo, no key)
-# ---------------------------
-
-def get_yahoo_quotes(symbols):
-    """
-    Returns dict: SYMBOL -> quote dict (best-effort; may rate limit).
-    Uses Yahoo's public quote endpoint.
-    """
-    if isinstance(symbols, str):
-        symbols = [symbols]
-
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    try:
-        r = requests.get(
-            url,
-            params={"symbols": ",".join(symbols)},
-            timeout=8,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        r.raise_for_status()
-        j = r.json()
-        results = j.get("quoteResponse", {}).get("result", [])
-        out = {r.get("symbol", "").upper(): r for r in results if r.get("symbol")}
-        for s in symbols:
-            out.setdefault(s.upper(), None)
-        return out
-    except Exception:
-        return {s.upper(): None for s in symbols}
-
-def pick_pct(q):
-    """
-    Prefer premarket % if present, else regular market %.
-    Returns float or NaN.
-    """
-    if not q:
-        return np.nan
-    pm = q.get("preMarketChangePercent", None)
-    rm = q.get("regularMarketChangePercent", None)
-    if pm is not None:
-        return float(pm)
-    if rm is not None:
-        return float(rm)
-    return np.nan
-
-def tape_signal():
-    """
-    Simple 'tape' score based on SPY/QQQ/DIA percent change.
-    Returns dict with avg move and bias label.
-    """
-    quotes = get_yahoo_quotes(["SPY", "QQQ", "DIA"])
-    spy = pick_pct(quotes.get("SPY"))
-    qqq = pick_pct(quotes.get("QQQ"))
-    dia = pick_pct(quotes.get("DIA"))
-
-    vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
-    avg = float(np.mean(vals)) if vals else np.nan
-
-    if not np.isnan(avg) and avg <= -0.80:
-        bias = "BEAR"
-    elif not np.isnan(avg) and avg >= 0.80:
-        bias = "BULL"
-    else:
-        bias = "NEUTRAL"
-
-    return {"spy": spy, "qqq": qqq, "dia": dia, "avg": avg, "bias": bias}
 
 # ---------------------------
 # Core: compute_stoplight (DROP-IN REPLACEMENT)
