@@ -55,24 +55,15 @@ def _pct_from_yf(symbol: str) -> float:
 
 def tape_signal():
     """
-    Simple 'tape' score based on SPY/QQQ/DIA percent change.
-    Uses yfinance directly.
+    Simple 'tape' score based on SPY/QQQ/DIA % change.
+    Uses cross_asset_snapshot() so the whole app uses one data source.
     """
-    import yfinance as yf
+    xa = cross_asset_snapshot()
+    pct = xa.get("pct", {})
 
-    def pct(ticker):
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                return ((hist["Close"][-1] / hist["Close"][-2]) - 1) * 100
-        except Exception:
-            pass
-        return np.nan
-
-    spy = pct("SPY")
-    qqq = pct("QQQ")
-    dia = pct("DIA")
+    spy = pct.get("SPY", np.nan)
+    qqq = pct.get("QQQ", np.nan)
+    dia = pct.get("DIA", np.nan)
 
     vals = [x for x in [spy, qqq, dia] if not np.isnan(x)]
     avg = float(np.mean(vals)) if vals else np.nan
@@ -85,7 +76,7 @@ def tape_signal():
         bias = "NEUTRAL"
 
     return {"spy": spy, "qqq": qqq, "dia": dia, "avg": avg, "bias": bias}
-
+    
 # ---------------------------
 # FRED helpers
 # ---------------------------
@@ -789,25 +780,52 @@ def compute_stoplight():
     )
     
     # Metrics (dashboard)
-    metrics = [
-        {"name": "Tape (live)",
-         "value": f"Avg {fmt_num(tape_avg,2)}%",
-         "delta": f"SPY {fmt_num(tape.get('spy'),2)} | QQQ {fmt_num(tape.get('qqq'),2)} | DIA {fmt_num(tape.get('dia'),2)}"},
-
-        {"name": "Regime", "value": regime, "delta": f"Stoplight: {light} | Leverage: {leverage_regime}"},
-        {"name": "Net", "value": str(int(net)), "delta": f"Trend: {trend_score} | Risk: {risk} | Macro flags: {macro_flags}"},
-        {"name": "VIX", "value": fmt_num(vix["last"], 2), "delta": f"5D {fmt_delta(vix['d5'], 2)} | Pctl90D {fmt_num(vix_pct, 0)}"},
-        {"name": "HY Spread", "value": fmt_num(hy["last"], 2), "delta": f"5D {fmt_delta(hy['d5'], 2)}"},
-        {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"5D {fmt_delta(y10['d5'], 2)}"},
-        {"name": "SPX", "value": fmt_num(spx_last, 2), "delta": f"5D {fmt_num(spx_5d, 2)}% | 21D {fmt_num(spx_21d, 2)}%"},
-        {"name": "NDX", "value": fmt_num(ndx_last, 2), "delta": f"5D {fmt_num(ndx_5d, 2)}% | 21D {fmt_num(ndx_21d, 2)}%"},
-        {"name": "DJIA", "value": fmt_num(dji_last, 2), "delta": f"5D {fmt_num(dji_5d, 2)}% | 21D {fmt_num(dji_21d, 2)}%"},
-        {"name": "Vol regime", "value": "ATR expanding" if atr_expansion else "ATR stable", "delta": f"NDX accel: {momentum_accel}"},
-        {"name": "Crypto (context)", "value": f"BTC {fmt_num(btc_24,2)}% / ETH {fmt_num(eth_24,2)}% (24h)", "delta": "Not in scoring"},
-        {"name": "Breadth", "value": f"RSP {fmt_num(rsp_pct,2)}% vs SPY {fmt_num(spy_pct,2)}%", "delta": "Equal-weight vs cap-weight"},
-        {"name": "Credit", "value": f"HYG {fmt_num(hyg_pct,2)}% vs LQD {fmt_num(lqd_pct,2)}%", "delta": "High yield vs IG"},
-        {"name": "USD / Gold / Bonds", "value": f"UUP {fmt_num(uup_pct,2)}% · GLD {fmt_num(gld_pct,2)}% · TLT {fmt_num(tlt_pct,2)}%", "delta": "Dollar / risk-hedges"},
-    ]
+   metrics = [
+    {
+        "name": "Tape (live)",
+        "value": f"Avg {fmt_num(tape_avg,2)}" + ("" if np.isnan(tape_avg) else "%"),
+        "delta": (
+            f"SPY {fmt_num((tape or {}).get('spy', np.nan), 2)} | "
+            f"QQQ {fmt_num((tape or {}).get('qqq', np.nan), 2)} | "
+            f"DIA {fmt_num((tape or {}).get('dia', np.nan), 2)}"
+        ),
+    },
+    {"name": "Regime", "value": regime, "delta": f"Stoplight: {light} | Leverage: {leverage_regime}"},
+    {"name": "Net", "value": str(int(net)), "delta": f"Trend: {trend_score} | Risk: {risk} | Macro flags: {macro_flags}"},
+    {"name": "VIX", "value": fmt_num(vix["last"], 2), "delta": f"5D {fmt_delta(vix['d5'], 2)} | Pctl90D {fmt_num(vix_pct, 0)}"},
+    {"name": "HY Spread", "value": fmt_num(hy["last"], 2), "delta": f"5D {fmt_delta(hy['d5'], 2)}"},
+    {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"5D {fmt_delta(y10['d5'], 2)}"},
+    {"name": "SPX", "value": fmt_num(spx_last, 2), "delta": f"5D {fmt_num(spx_5d, 2)}% | 21D {fmt_num(spx_21d, 2)}%"},
+    {"name": "NDX", "value": fmt_num(ndx_last, 2), "delta": f"5D {fmt_num(ndx_5d, 2)}% | 21D {fmt_num(ndx_21d, 2)}%"},
+    {"name": "DJIA", "value": fmt_num(dji_last, 2), "delta": f"5D {fmt_num(dji_5d, 2)}% | 21D {fmt_num(dji_21d, 2)}%"},
+    {"name": "Vol regime", "value": "ATR expanding" if atr_expansion else "ATR stable", "delta": f"NDX accel: {momentum_accel}"},
+    {"name": "Crypto (context)", "value": f"BTC {fmt_num(btc_24,2)}% / ETH {fmt_num(eth_24,2)}% (24h)", "delta": "Not in scoring"},
+{
+    "name": "Breadth",
+    "value": (
+        f"RSP {fmt_num(rsp_pct,2)}" + ("" if np.isnan(rsp_pct) else "%") +
+        f" vs SPY {fmt_num(spy_pct,2)}" + ("" if np.isnan(spy_pct) else "%")
+    ),
+    "delta": "Equal-weight vs cap-weight",
+},
+{
+    "name": "Credit",
+    "value": (
+        f"HYG {fmt_num(hyg_pct,2)}" + ("" if np.isnan(hyg_pct) else "%") +
+        f" vs LQD {fmt_num(lqd_pct,2)}" + ("" if np.isnan(lqd_pct) else "%")
+    ),
+    "delta": "High yield vs IG",
+},
+{
+    "name": "USD / Gold / Bonds",
+    "value": (
+        f"UUP {fmt_num(uup_pct,2)}" + ("" if np.isnan(uup_pct) else "%") + " · " +
+        f"GLD {fmt_num(gld_pct,2)}" + ("" if np.isnan(gld_pct) else "%") + " · " +
+        f"TLT {fmt_num(tlt_pct,2)}" + ("" if np.isnan(tlt_pct) else "%")
+    ),
+    "delta": "Dollar / risk-hedges",
+},
+]
 
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
