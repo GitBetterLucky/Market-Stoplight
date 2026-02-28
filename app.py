@@ -556,20 +556,22 @@ def compute_stoplight():
             f"{'aligned' if crypto_agree else 'mixed'}."
         )
 
-    # Metrics (dashboard)
-    metrics = [
-        {"name": "Tape (live)", "value": f"Avg {fmt_num(tape_avg,2)}%", "delta": f"SPY {fmt_num(tape.get('spy'),2)} | QQQ {fmt_num(tape.get('qqq'),2)} | DIA {fmt_num(tape.get('dia'),2)}"},
-        {"name": "Regime", "value": regime, "delta": f"Stoplight: {light} | Leverage: {leverage_regime}"},
-        {"name": "Net", "value": str(int(net)), "delta": f"Trend: {trend_score} | Risk: {risk} | Macro flags: {macro_flags}"},
-        {"name": "Tape (live)", "value": f"Avg {fmt_num(tape_avg,2)}%", "delta": f"SPY {fmt_num(tape.get('spy'),2)} | QQQ {fmt_num(tape.get('qqq'),2)} | DIA {fmt_num(tape.get('dia'),2)}"},
-        {"name": "VIX", "value": fmt_num(vix["last"], 2), "delta": f"5D {fmt_delta(vix['d5'], 2)} | Pctl90D {fmt_num(vix_pct, 0)}"},
-        {"name": "HY Spread", "value": fmt_num(hy["last"], 2), "delta": f"5D {fmt_delta(hy['d5'], 2)}"},
-        {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"5D {fmt_delta(y10['d5'], 2)}"},
-        {"name": "SPX", "value": fmt_num(spx_last, 2), "delta": f"5D {fmt_num(spx_5d, 2)}% | 21D {fmt_num(spx_21d, 2)}%"},
-        {"name": "NDX", "value": fmt_num(ndx_last, 2), "delta": f"5D {fmt_num(ndx_5d, 2)}% | 21D {fmt_num(ndx_21d, 2)}%"},
-        {"name": "DJIA", "value": fmt_num(dji_last, 2), "delta": f"5D {fmt_num(dji_5d, 2)}% | 21D {fmt_num(dji_21d, 2)}%"},
-        {"name": "Vol regime", "value": "ATR expanding" if atr_expansion else "ATR stable", "delta": f"NDX accel: {momentum_accel}"},
-        {"name": "Crypto (context)", "value": f"BTC {fmt_num(btc_24,2)}% / ETH {fmt_num(eth_24,2)}% (24h)", "delta": "Not in scoring"},
+# Metrics (dashboard)
+metrics = [
+    {"name": "Tape (live)",
+     "value": f"Avg {fmt_num(tape_avg,2)}%",
+     "delta": f"SPY {fmt_num(tape.get('spy'),2)} | QQQ {fmt_num(tape.get('qqq'),2)} | DIA {fmt_num(tape.get('dia'),2)}"},
+
+    {"name": "Regime", "value": regime, "delta": f"Stoplight: {light} | Leverage: {leverage_regime}"},
+    {"name": "Net", "value": str(int(net)), "delta": f"Trend: {trend_score} | Risk: {risk} | Macro flags: {macro_flags}"},
+    {"name": "VIX", "value": fmt_num(vix["last"], 2), "delta": f"5D {fmt_delta(vix['d5'], 2)} | Pctl90D {fmt_num(vix_pct, 0)}"},
+    {"name": "HY Spread", "value": fmt_num(hy["last"], 2), "delta": f"5D {fmt_delta(hy['d5'], 2)}"},
+    {"name": "10Y", "value": fmt_num(y10["last"], 2), "delta": f"5D {fmt_delta(y10['d5'], 2)}"},
+    {"name": "SPX", "value": fmt_num(spx_last, 2), "delta": f"5D {fmt_num(spx_5d, 2)}% | 21D {fmt_num(spx_21d, 2)}%"},
+    {"name": "NDX", "value": fmt_num(ndx_last, 2), "delta": f"5D {fmt_num(ndx_5d, 2)}% | 21D {fmt_num(ndx_21d, 2)}%"},
+    {"name": "DJIA", "value": fmt_num(dji_last, 2), "delta": f"5D {fmt_num(dji_5d, 2)}% | 21D {fmt_num(dji_21d, 2)}%"},
+    {"name": "Vol regime", "value": "ATR expanding" if atr_expansion else "ATR stable", "delta": f"NDX accel: {momentum_accel}"},
+    {"name": "Crypto (context)", "value": f"BTC {fmt_num(btc_24,2)}% / ETH {fmt_num(eth_24,2)}% (24h)", "delta": "Not in scoring"},
     ]
 
     return {
