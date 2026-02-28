@@ -545,7 +545,6 @@ def compute_stoplight():
     tape_avg = tape.get("avg", np.nan)
     tape_bias = tape.get("bias", "NEUTRAL")
 
-    # If tape is bearish enough, downgrade regime by 1 tier (overlay only)
     tape_downgrade = 0
     if not np.isnan(tape_avg) and tape_avg <= -0.80:
         tape_downgrade = 1
@@ -553,8 +552,8 @@ def compute_stoplight():
             0,
             f"Tape risk-off (SPY/QQQ/DIA avg {fmt_num(tape_avg,2)}%) → avoid long leverage today."
         )
-         # ---------------------------
-    
+
+    # ---------------------------
     # Cross-asset snapshot (Yahoo) — used for scoring + interpretation
     # ---------------------------
     xa = cross_asset_snapshot()
@@ -571,10 +570,44 @@ def compute_stoplight():
     gld_pct = pct.get("GLD", np.nan)
     tlt_pct = pct.get("TLT", np.nan)
     uso_pct = pct.get("USO", np.nan)
-    jpy_pct = pct.get("JPY=X", np.nan)  # % change in USDJPY (best-effort)   
 
     # ---------------------------
-        # 5-tier regime (headline)
+    # Structural add-ons (breadth + credit proxy + USD risk)
+    # ---------------------------
+    structural_risk = 0
+    structural_notes = []
+
+    # Breadth proxy: equal-weight (RSP) underperforming cap-weight (SPY) is a mild risk-off tell
+    if not np.isnan(rsp_pct) and not np.isnan(spy_pct):
+        if (rsp_pct - spy_pct) <= -0.30:
+            structural_risk += 1
+            structural_notes.append("Breadth weak (RSP < SPY) → fewer stocks carrying the index; leverage less forgiving.")
+
+    # Small caps proxy: IWM dumping is another mild risk-off tell
+    if not np.isnan(iwm_pct) and iwm_pct <= -1.00:
+        structural_risk += 1
+        structural_notes.append("Small caps weak (IWM down) → risk appetite fading / tighter conditions bite.")
+
+    # Credit proxy: HYG < LQD is risk-off
+    if not np.isnan(hyg_pct) and not np.isnan(lqd_pct):
+        if (hyg_pct - lqd_pct) <= -0.25:
+            structural_risk += 1
+            structural_notes.append("Credit risk-off (HYG < LQD) → junk underperforming; equities can wobble.")
+
+    # USD squeeze proxy: UUP up hard can pressure risk assets (esp. growth/EM/commodities)
+    if not np.isnan(uup_pct) and uup_pct >= 0.40:
+        structural_risk += 1
+        structural_notes.append("USD strong (UUP up) → risk assets often struggle in dollar-squeeze tape.")
+
+    # Apply structural risk to your existing risk score (keep it small so it’s an overlay, not a takeover)
+    if structural_risk > 0:
+        risk += min(structural_risk, 2)   # cap contribution
+        macro_flags = max(macro_flags, 1)
+        why_points.extend(structural_notes[:2])
+
+    # ---------------------------
+    # 5-tier regime (headline)
+    # ---------------------------
     tiers = ["HIGH RISK", "ELEVATED RISK", "NEUTRAL", "LOW RISK", "NIRVANA"]
 
     if net <= -5:
@@ -698,6 +731,9 @@ def compute_stoplight():
         {"name": "DJIA", "value": fmt_num(dji_last, 2), "delta": f"5D {fmt_num(dji_5d, 2)}% | 21D {fmt_num(dji_21d, 2)}%"},
         {"name": "Vol regime", "value": "ATR expanding" if atr_expansion else "ATR stable", "delta": f"NDX accel: {momentum_accel}"},
         {"name": "Crypto (context)", "value": f"BTC {fmt_num(btc_24,2)}% / ETH {fmt_num(eth_24,2)}% (24h)", "delta": "Not in scoring"},
+        {"name": "Breadth", "value": f"RSP {fmt_num(rsp_pct,2)}% vs SPY {fmt_num(spy_pct,2)}%", "delta": "Equal-weight vs cap-weight"},
+        {"name": "Credit", "value": f"HYG {fmt_num(hyg_pct,2)}% vs LQD {fmt_num(lqd_pct,2)}%", "delta": "High yield vs IG"},
+        {"name": "USD / Gold / Bonds", "value": f"UUP {fmt_num(uup_pct,2)}% · GLD {fmt_num(gld_pct,2)}% · TLT {fmt_num(tlt_pct,2)}%", "delta": "Dollar / risk-hedges"},
     ]
 
     return {
