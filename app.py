@@ -227,9 +227,6 @@ def regime_2_0_net(scores):
     return int(round(net))
 
 def stoplight_5_tier(net):
-    """
-    Returns: light (color), tier (label), icon (emoji or token)
-    """
     if net <= -5:
         return "RED", "HIGH RISK", "🛑"
     if net <= -2:
@@ -238,7 +235,7 @@ def stoplight_5_tier(net):
         return "YELLOW", "NEUTRAL", "🟡"
     if net <= 4:
         return "GREEN", "LOW RISK", "🟢"
-    return "SUN", "NIRVANA", "🌞"
+    return "STAR", "NIRVANA", "⭐"
     
 # ---------------------------
 # FRED helpers
@@ -888,3 +885,133 @@ def compute_stoplight():
         "why": why[:10],
         "chips": chips,
     }
+# ---------------------------
+# Routes
+# ---------------------------
+
+@app.get("/status")
+def status():
+    return compute_stoplight()
+
+
+@app.get("/", response_class=HTMLResponse)
+def homepage():
+    try:
+        data = compute_stoplight()
+    except Exception as e:
+        data = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "light": "YELLOW",
+            "regime": "NEUTRAL",
+            "confidence": "LOW",
+            "net": "NA",
+            "metrics": [],
+            "chips": [],
+            "why": [f"compute_stoplight error: {type(e).__name__}: {e}"],
+        }
+
+    light = data.get("light", "YELLOW")
+
+    # 5-tier color map
+    color_map = {
+        "RED": "#ff4d4f",
+        "ORANGE": "#ff9f43",
+        "YELLOW": "#ffd166",
+        "GREEN": "#2ee59d",
+        "STAR": "#6ecbff",
+    }
+    color = color_map.get(light, "#ffd166")
+
+    cards_html = "".join([
+        f"""
+        <div class="card">
+          <div class="k">{m.get("name","")}</div>
+          <div class="row">
+            <div class="val">{m.get("value","")}</div>
+            <div class="delta">{m.get("delta","")}</div>
+          </div>
+        </div>
+        """ for m in data.get("metrics", [])
+    ])
+
+    why_html = "".join([f"<li>{x}</li>" for x in data.get("why", [])])
+    menu_html = "".join([f'<span class="chip">{x}</span>' for x in data.get("chips", [])])
+
+    return f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Market Stoplight</title>
+  <style>
+    :root {{
+      --bg:#070a12;
+      --panel:rgba(255,255,255,.06);
+      --border:rgba(255,255,255,.12);
+      --muted:rgba(255,255,255,.72);
+      --muted2:rgba(255,255,255,.55);
+      --accent:{color};
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+    }}
+    body {{ margin:0; font-family: -apple-system, system-ui, Segoe UI, Roboto, Arial; background:var(--bg); color:#fff; }}
+    .wrap {{ max-width: 860px; margin:0 auto; padding:22px 16px 40px; }}
+    .top {{ display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; align-items:baseline; }}
+    .title {{ font-size: 22px; font-weight: 800; }}
+    .stamp {{ font-family:var(--mono); color:var(--muted2); font-size:12px; }}
+    .grid {{ display:grid; grid-template-columns: 280px 1fr; gap:14px; margin-top:14px; }}
+    @media(max-width:760px){{ .grid{{grid-template-columns:1fr;}} }}
+    .panel {{ background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:16px; }}
+    .light {{ width:210px; height:210px; border-radius:50%; margin:6px auto 10px; background:var(--accent); box-shadow:0 0 0 8px rgba(255,255,255,.06); }}
+    .label {{ text-align:center; font-size:28px; font-weight:900; letter-spacing:1px; }}
+    .sub {{ text-align:center; margin-top:6px; color:var(--muted); }}
+    .k {{ color:var(--muted2); font-size:12px; letter-spacing:.10em; text-transform:uppercase; margin-bottom:8px; }}
+    .cards {{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; }}
+    @media(max-width:760px){{ .cards{{grid-template-columns:1fr;}} }}
+    .card {{ border:1px solid var(--border); border-radius:14px; padding:12px; background:rgba(0,0,0,.14); }}
+    .row {{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }}
+    .val {{ font-size:18px; font-weight:800; }}
+    .delta {{ font-family:var(--mono); font-size:12px; color:var(--muted); text-align:right; }}
+    ul {{ margin:6px 0 0 18px; color:var(--muted); line-height:1.45; }}
+    .chip {{ display:inline-block; margin:6px 6px 0 0; padding:7px 10px; border-radius:999px; border:1px solid var(--border); background:rgba(0,0,0,.12); font-size:13px; }}
+    .headline {{ font-size:16px; font-weight:800; margin-bottom:8px; }}
+    .note {{ margin-top:12px; color:var(--muted2); font-size:12px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="title">Market Stoplight</div>
+      <div class="stamp">Updated: {data.get("timestamp","")}</div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="light"></div>
+        <div class="label">{data.get("regime","NEUTRAL")}</div>
+        <div class="sub">Stoplight: {data.get("light","YELLOW")} · Confidence: {data.get("confidence","NA")} · Net: {data.get("net","NA")}</div>
+
+        <div class="note">
+          <div class="k">Interpretation (Why)</div>
+          <ul>
+            {why_html}
+          </ul>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="headline">Dashboard</div>
+        <div class="cards">
+          {cards_html}
+        </div>
+
+        <div style="margin-top:14px;">
+          <div class="k">Levers (menu, not advice)</div>
+          {menu_html}
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
