@@ -1558,6 +1558,8 @@ def homepage():
     .chip {{ display:inline-block; margin:6px 6px 0 0; padding:7px 10px; border-radius:999px; border:1px solid var(--border); background:rgba(0,0,0,.12); font-size:13px; }}
     .headline {{ font-size:16px; font-weight:800; margin-bottom:8px; }}
     .note {{ margin-top:12px; color:var(--muted2); font-size:12px; }}
+    input:focus {{ outline: 2px solid rgba(255,255,255,.18); outline-offset: 2px; }}
+    button:hover {{ background: rgba(255,255,255,.12) !important; }}
   </style>
 </head>
 <body>
@@ -1568,6 +1570,7 @@ def homepage():
     </div>
 
     <div class="grid">
+      <!-- Left: stoplight -->
       <div class="panel">
         <div class="light"></div>
         <div class="label">{data.get("regime","NEUTRAL")}</div>
@@ -1581,19 +1584,122 @@ def homepage():
         </div>
       </div>
 
-      <div class="panel">
-        <div class="headline">Dashboard</div>
-        <div class="cards">
-          {cards_html}
+      <!-- Right: Event Playbook (top) + Dashboard (bottom) -->
+      <div>
+        <div class="panel" style="margin-bottom:14px;">
+          <div class="headline">Event Playbook</div>
+
+          <form id="eventForm" style="display:flex; gap:10px; flex-wrap:wrap;">
+            <input
+              id="eventQuery"
+              type="text"
+              placeholder="Type an event… (e.g., Iran Israel joint strike)"
+              style="flex:1; min-width:240px; padding:10px 12px; border-radius:12px; border:1px solid var(--border); background:rgba(0,0,0,.18); color:#fff;"
+            />
+            <button
+              type="submit"
+              style="padding:10px 14px; border-radius:12px; border:1px solid var(--border); background:rgba(255,255,255,.08); color:#fff; cursor:pointer; font-weight:700;"
+            >
+              Run
+            </button>
+          </form>
+
+          <div id="eventStatus" style="margin-top:10px; color:var(--muted2); font-size:12px;"></div>
+          <div id="eventResults" style="margin-top:10px;"></div>
         </div>
 
-        <div style="margin-top:14px;">
-          <div class="k">Levers (menu, not advice)</div>
-          {menu_html}
+        <div class="panel">
+          <div class="headline">Dashboard</div>
+          <div class="cards">
+            {cards_html}
+          </div>
+
+          <div style="margin-top:14px;">
+            <div class="k">Levers (menu, not advice)</div>
+            {menu_html}
+          </div>
         </div>
       </div>
     </div>
   </div>
+
+  <script>
+    const form = document.getElementById("eventForm");
+    const input = document.getElementById("eventQuery");
+    const statusEl = document.getElementById("eventStatus");
+    const resultsEl = document.getElementById("eventResults");
+
+    function pct(x) {{
+      if (x === null || x === undefined || Number.isNaN(x)) return "NA";
+      const sign = x > 0 ? "+" : "";
+      return sign + x.toFixed(2) + "%";
+    }}
+
+    function esc(s) {{
+      return String(s ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }}
+
+    form.addEventListener("submit", async (e) => {{
+      e.preventDefault();
+      const q = (input.value || "").trim();
+      if (!q) return;
+
+      statusEl.textContent = "Running…";
+      resultsEl.innerHTML = "";
+
+      try {{
+        const res = await fetch(`/event?q=${{encodeURIComponent(q)}}`);
+        const data = await res.json();
+
+        if (!res.ok || data.error) {{
+          statusEl.textContent = data.error || `Error (${{res.status}})`;
+          return;
+        }}
+
+        const analogList = (data.analogs_used || [])
+          .map(a => `<li>${{esc(a.date)}} — ${{esc(a.name)}}</li>`)
+          .join("");
+
+        // Keep horizons stable + ordered
+        const rankings = (data.results && data.results.basket_rankings) ? data.results.basket_rankings : {{}};
+        const horizons = ["1","5","21","63"].filter(h => rankings[h]);
+
+        const blocks = horizons.map(h => {{
+          const rows = (rankings[h] || []).slice(0, 5).map(r => `
+            <div style="display:flex; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,.06);">
+              <div style="color:#fff;">${{esc(r.basket)}}</div>
+              <div style="font-family:var(--mono); color:var(--muted);">
+                α(med): ${{pct(r.avg_median_alpha)}} · hit: ${{Number(r.avg_hit_rate).toFixed(0)}}%
+              </div>
+            </div>
+          `).join("");
+
+          return `
+            <div style="margin-top:10px;">
+              <div class="k">Top baskets — ${{h}}D</div>
+              ${{rows || `<div style="color:var(--muted2); font-size:12px;">No data.</div>`}}
+            </div>
+          `;
+        }}).join("");
+
+        statusEl.textContent = `Matched ${{(data.analogs_used || []).length}} analog(s)`;
+
+        resultsEl.innerHTML = `
+          <div class="k">Analogs used</div>
+          <ul>${{analogList}}</ul>
+          ${{blocks}}
+          <div class="note">α = excess return vs SPY, using median alpha across analogs. Educational only.</div>
+        `;
+      }} catch (err) {{
+        statusEl.textContent = "Failed to fetch results. (Network or server error)";
+      }}
+    }});
+  </script>
 </body>
 </html>
 """
