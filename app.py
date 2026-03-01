@@ -1236,12 +1236,26 @@ def _next_trading_days(index: pd.DatetimeIndex, start: pd.Timestamp, n: int) -> 
 
 @lru_cache(maxsize=256)
 def _yf_close_series(symbol: str, start: str, end: str) -> pd.Series:
-    df = yf.download(symbol, start=start, end=end, interval="1d", auto_adjust=False, progress=False, threads=False)
+    df = yf.download(
+        symbol,
+        start=start,
+        end=end,
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+    )
     if df is None or df.empty or "Close" not in df:
         return pd.Series(dtype=float)
+
     s = df["Close"].dropna()
     s.index = pd.to_datetime(s.index)
-    return s
+
+    # KEY: ensure unique index so .loc[timestamp] returns a scalar
+    if not s.index.is_unique:
+        s = s[~s.index.duplicated(keep="last")]
+
+    return s.sort_index()
 
 def _return_over_horizon(px: pd.Series, event_date: str, horizon_days: int) -> float:
     if px is None or px.empty:
@@ -1255,8 +1269,17 @@ def _return_over_horizon(px: pd.Series, event_date: str, horizon_days: int) -> f
 
     if start_t is None or end_t is None:
         return np.nan
-    p0 = float(px.loc[start_t])
-    p1 = float(px.loc[end_t])
+    v0 = px.loc[start_t]
+    v1 = px.loc[end_t]
+    
+    # If duplicates slip through, take the last value
+    if isinstance(v0, pd.Series):
+        v0 = v0.iloc[-1]
+    if isinstance(v1, pd.Series):
+        v1 = v1.iloc[-1]
+    
+    p0 = float(v0)
+    p1 = float(v1)
     if p0 == 0:
         return np.nan
     return (p1 / p0 - 1.0) * 100.0
